@@ -15,7 +15,7 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 simulate_command() {
     local cmd="$1"; shift
-    print_info "Simulating Telegram: /$cmd ${*}"
+    print_info "Simulating Telegram: /$cmd ${*} (userID: ${USER_ID:-987654321})"
     case "$cmd" in
         begin)
             [ "$#" -lt 1 ] && { print_error "Missing repo"; return 1; }

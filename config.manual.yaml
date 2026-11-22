@@ -52,4 +52,5 @@ allowed_models:
   - Qwen3-Coder-Next-MLX-4bit
   - GLM-4.7-Flash-MLX-8bit
   - MiMo-V2.6-Distill-Qwen-9B-MLX-4bit
-telegram_chat_id: 123456789  # Replace with your actual Telegram chat ID
+telegram_chat_id: 123456789  # Your Telegram chat ID
+authorized_user_id: 987654321  # Your Telegram user ID (must match who controls the bot)

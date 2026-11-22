@@ -606,6 +606,7 @@ cp .env.example .env
 
 **Required:**
 - `PI_AUTOPILOT_TELEGRAM_TOKEN`: Your BotFather token
+- `PI_AUTOPILOT_AUTHORIZED_USER_ID`: Your Telegram user ID (required for access control)
 
 **Optional:**
 - `PI_AUTOPILOT_TELEGRAM_CHAT_ID`: Override chat ID from config.yaml

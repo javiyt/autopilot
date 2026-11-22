@@ -89,10 +89,11 @@ func (t *Telegram) Send(ctx context.Context, message string) error {
 type telegramUpdate struct {
 	UpdateID int64 `json:"update_id"`
 	Message  struct {
-		Chat struct {
+		UserID int64 `json:"from"`
+		Chat   struct {
 			ID int64 `json:"id"`
 		} `json:"chat"`
-		From struct {
+		From  struct {
 			IsBot bool `json:"is_bot"`
 		} `json:"from"`
 		Text string `json:"text"`
@@ -122,7 +123,7 @@ func (t *Telegram) Poll(ctx context.Context, app *App) {
 			}
 			// Consume even unauthorized messages, but NEVER execute or reply to them.
 			if u.Message.Chat.ID == t.chatID && !u.Message.From.IsBot && strings.TrimSpace(u.Message.Text) != "" {
-				app.HandleTelegram(ctx, u.Message.Text)
+				app.HandleTelegram(ctx, u.Message.UserID, u.Message.Text)
 			}
 			if err := app.update(func(s *State) { s.TelegramOffset = u.UpdateID + 1 }); err != nil {
 				log.Printf("Unable to persist Telegram offset: %v", err)
@@ -151,12 +152,19 @@ func (t *Telegram) DiscoverChatIDs(ctx context.Context) ([]int64, error) {
 	return ids, nil
 }
 
-func (a *App) HandleTelegram(ctx context.Context, incoming string) {
+func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string) {
 	text := strings.TrimSpace(incoming)
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
 		return
 	}
+	
+	// Check if user is authorized
+	if a.cfg.AuthorizedUserID > 0 && userID != a.cfg.AuthorizedUserID {
+		_ = a.telegram.Send(ctx, "Access denied. Only authorized users can control this bot.")
+		return
+	}
+	
 	cmd := strings.SplitN(parts[0], "@", 2)[0]
 	rest := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
 	reply := func(s string) { a.notify(s) }
@@ -164,21 +172,6 @@ func (a *App) HandleTelegram(ctx context.Context, incoming string) {
 	case "/start":
 		if len(parts) < 2 {
 			reply("Usage: /start <repo> [milestone]")
-			return
-		}
-		repo := parts[1]
-		milestone := ""
-		if len(parts) >= 3 {
-			milestone = parts[2]
-		}
-		if err := a.startManualIssue(ctx, repo, milestone); err != nil {
-			reply(err.Error())
-			return
-		}
-		reply(fmt.Sprintf("Starting manual work on repo=%s, milestone=%s. The next issue(s) with label=%q will be processed.", repo, milestone, a.cfg.Label))
-	case "/begin":
-		if len(parts) < 2 {
-			reply("Usage: /begin <repo> [milestone]")
 			return
 		}
 		repo := parts[1]

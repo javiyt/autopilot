@@ -47,6 +47,7 @@ type Config struct {
 	Models              map[string]ModelProfile `yaml:"models"`
 	AllowedModels       []string                `yaml:"allowed_models"`
 	TelegramChatID      int64                   `yaml:"telegram_chat_id"`
+	AuthorizedUserID    int64                   `yaml:"authorized_user_id,omitempty"`
 	ManualRepo          string                  `yaml:"manual_repo,omitempty"`
 	ManualMilestone     string                  `yaml:"manual_milestone,omitempty"`
 }
@@ -153,6 +154,9 @@ func ReadConfig(path string) (Config, error) {
 	}
 	if cfg.TelegramChatID <= 0 {
 		return cfg, errors.New("telegram_chat_id must be a positive authorized chat ID")
+	}
+	if cfg.AuthorizedUserID <= 0 {
+		return cfg, errors.New("authorized_user_id must be a positive value for access control")
 	}
 	if cfg.ManualRepo != "" && cfg.Repo != "" {
 		return cfg, errors.New("cannot set both repo and manual_repo")
