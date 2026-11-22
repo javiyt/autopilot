@@ -155,8 +155,9 @@ func ReadConfig(path string) (Config, error) {
 	if cfg.TelegramChatID <= 0 {
 		return cfg, errors.New("telegram_chat_id must be a positive authorized chat ID")
 	}
-	if cfg.AuthorizedUserID <= 0 {
-		return cfg, errors.New("authorized_user_id must be a positive value for access control")
+	// authorized_user_id is optional: 0 means no access control (auto-discover mode allowed)
+	if cfg.AuthorizedUserID < 0 {
+		return cfg, errors.New("authorized_user_id must be 0 or a positive value for access control")
 	}
 	if cfg.ManualRepo != "" && cfg.Repo != "" {
 		return cfg, errors.New("cannot set both repo and manual_repo")

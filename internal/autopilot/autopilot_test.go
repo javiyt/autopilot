@@ -56,6 +56,7 @@ models:
   chat: {provider: omlx, id: reviewer, thinking: low}
 allowed_models: [planner, coder, reviewer]
 telegram_chat_id: 123
+authorized_user_id: 987654321
 `
 	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
 		t.Fatal(err)
@@ -70,7 +71,8 @@ telegram_chat_id: 123
 	if cfg.StateDir != filepath.Join(dir, "work") {
 		t.Fatalf("wrong state dir: %s", cfg.StateDir)
 	}
-	if err := os.WriteFile(path, []byte(source+"unknown_setting: true\n"), 0600); err != nil {
+	sourceWithUnknown := source + "unknown_setting: true\n"
+	if err := os.WriteFile(path, []byte(sourceWithUnknown), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ReadConfig(path); err == nil {
@@ -134,8 +136,8 @@ func TestSavedStateSurvivesRestartAndTelegramFix(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	a.HandleTelegram(context.Background(), "/use implement 3")
-	a.HandleTelegram(context.Background(), "/fix Try a simpler implementation")
+	a.HandleTelegram(context.Background(), 123456789, "/use implement 3")
+	a.HandleTelegram(context.Background(), 123456789, "/fix Try a simpler implementation")
 	state, err := LoadState(a.statePath, cfg)
 	if err != nil {
 		t.Fatal(err)
