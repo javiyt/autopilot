@@ -1,0 +1,5 @@
+/config.yaml
+/autopilot-state/
+/.env
+/pi-autopilot
+*.log

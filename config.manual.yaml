@@ -1,0 +1,55 @@
+# Manual Mode Configuration Example
+# Start with: /start <repo> [milestone]
+# Reset with: /reset
+
+# For manual mode, repo and milestone should be empty or use manual_* fields
+repo: ""
+milestone: ""
+label: agent-ready
+state_dir: ./autopilot-state
+poll_seconds: 60
+idle_timeout_minutes: 20
+stage_timeout_minutes: 180
+max_stage_retries: 3
+max_review_rounds: 3
+max_ci_fixes: 2
+max_local_fixes: 3
+ci_wait_minutes: 30
+auto_merge: false
+check_commands:
+  - make check
+ci_rerun_patterns:
+  - "The job was not started because"
+project_number: 0
+project_owner: ""
+project_in_progress: "In Progress"
+
+models:
+  investigate:
+    provider: omlx
+    id: Qwen3.5-9B-MLX-8bit
+    thinking: low
+  plan:
+    provider: omlx
+    id: Qwen3.8-27B-4bit
+    thinking: medium
+  implement:
+    provider: omlx
+    id: Qwen3-Coder-Next-MLX-4bit
+    thinking: "off"
+  review:
+    provider: omlx
+    id: GLM-4.7-Flash-MLX-8bit
+    thinking: low
+  chat:
+    provider: omlx
+    id: GLM-4.7-Flash-MLX-8bit
+    thinking: low
+
+allowed_models:
+  - Qwen3.5-9B-MLX-8bit
+  - Qwen3.8-27B-4bit
+  - Qwen3-Coder-Next-MLX-4bit
+  - GLM-4.7-Flash-MLX-8bit
+  - MiMo-V2.6-Distill-Qwen-9B-MLX-4bit
+telegram_chat_id: 123456789  # Replace with your actual Telegram chat ID

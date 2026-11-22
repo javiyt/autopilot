@@ -1,0 +1,197 @@
+# Pi Autopilot - Multi-platform configuration example
+#
+# Supports multiple providers: local (Ollama, MLX) and external (OpenAI, Anthropic)
+#
+# ======================= CONFIGURATION =======================
+#
+# For use on any server, the provider is configurable.
+# You can connect to:
+#   - Local server: Ollama, MLX (macOS Apple Silicon)
+#   - External server: OpenAI API, Anthropic API, compatible endpoint
+#   - Any server with OpenAI/Anthropic-compatible endpoint
+#
+# ======================= REPOSITORY =======================
+
+# Repository to manage
+repo: OWNER/REPO
+
+# GitHub milestone label (optional)
+milestone: ""
+
+# Issue label that triggers autopilot (must exist in repo)
+label: agent-ready
+
+# Directory for state and artifacts (relative to config)
+state_dir: ./autopilot-state
+
+# Polling interval (seconds) for checking new issues
+poll_seconds: 60
+
+# Timeout before Telegram notification for inactive issues
+idle_timeout_minutes: 20
+
+# Timeout per stage before Telegram notification
+stage_timeout_minutes: 180
+
+# Maximum retries per stage before blocking
+max_stage_retries: 3
+
+# Maximum review rounds before blocking
+max_review_rounds: 3
+
+# Maximum fix attempts in CI before blocking
+max_ci_fixes: 2
+
+# Maximum local fix attempts before blocking
+max_local_fixes: 3
+
+# Wait time for CI completion (minutes)
+ci_wait_minutes: 30
+
+# Merge policy: false = manual (leave PR open), true = auto (squash merge)
+# Once started, this policy is immutable for the issue
+auto_merge: false
+
+# Required check commands. All must pass.
+# If empty, supervisor will not simulate success
+check_commands:
+  - make check
+
+# Log substrings indicating known CI infrastructure failures
+# Only matching failures get one deterministic `gh run rerun --failed`
+ci_rerun_patterns:
+  - "The job was not started because"
+
+# Optional GitHub Projects status update (leave blank to disable)
+project_number: 0
+project_owner: ""
+project_in_progress: "In Progress"
+
+# ======================= MODEL CONFIGURATION =======================
+#
+# AVAILABLE PROVIDERS:
+#   - omlx        : Local Apple Silicon (macOS)
+#   - ollama      : Local Ollama server
+#   - openai      : OpenAI API (external)
+#   - anthropic   : Anthropic API (external)
+#   - openai-compatible : Any OpenAI-compatible endpoint
+#   - anthropic-compatible : Any Anthropic-compatible endpoint
+#
+# CONFIGURATION FOR USING EXTERNAL SERVER:
+#
+# Option A: External dedicated server
+#   provider: openai
+#   base_url: https://api.openai.com/v1 (or your custom endpoint)
+#   api_key: "sk-..." (or use OPENAI_API_KEY environment variable)
+#
+# Option B: Ollama server on another host
+#   provider: ollama
+#   base_url: http://ollama-server.example.com:11434
+#
+# Option C: Remote MLX server (macOS)
+#   provider: omlx
+#   (requires MLX installation on remote server)
+#
+# ======================= EXAMPLES =======================
+#
+# 1. OpenAI API (external):
+#    provider: openai
+#    base_url: https://api.openai.com/v1
+#    api_key: ""  # or configure OPENAI_API_KEY
+#    id: gpt-4o-mini
+#
+# 2. Anthropic API (external):
+#    provider: anthropic
+#    base_url: https://api.anthropic.com/v1
+#    api_key: ""  # or configure ANTHROPIC_API_KEY
+#    id: claude-3-5-sonnet-20240620
+#
+# 3. Local Ollama:
+#    provider: ollama
+#    base_url: http://localhost:11434
+#    id: qwen2.5:7b
+#
+# 4. Remote Ollama:
+#    provider: ollama
+#    base_url: http://ollama.example.com:11434
+#    id: qwen2.5:7b
+#
+# 5. Custom OpenAI-compatible endpoint:
+#    provider: openai-compatible
+#    base_url: http://llm-custom.example.com/v1
+#    api_key: ""  # or API_KEY_DEL_SERVIDOR
+#    id: your-model-name
+#
+# ======================= CONFIGURATION =======================
+models:
+  investigate:
+    # Provider configurable (empty for auto-detect)
+    provider: ""  # empty = auto-detect (omlx on macOS, ollama elsewhere)
+    id: qwen2.5:7b   # Change based on your provider/model
+    thinking: low
+    # For external provider:
+    # provider: openai
+    # base_url: https://api.openai.com/v1
+    # api_key: ""  # or configure OPENAI_API_KEY
+    # id: gpt-4o-mini
+
+  plan:
+    provider: ""
+    id: qwen2.5:7b
+    thinking: medium
+
+  implement:
+    provider: ""
+    id: qwen2.5:7b
+    thinking: "off"
+
+  review:
+    provider: ""
+    id: qwen2.5:1.5b
+    thinking: low
+
+  chat:
+    provider: ""
+    id: qwen2.5:7b
+    thinking: low
+
+# ======================= ALLOWED MODELS LIST (Telegram) =======================
+#
+# List of models that can be changed via Telegram (/use <role> <model>)
+# Includes local and external models
+allowed_models:
+  # Ollama models
+  - qwen2.5:7b
+  - qwen2.5:1.5b
+  - qwen2.5:14b
+
+  # OpenAI models
+  - gpt-4o-mini
+  - gpt-4o
+  - gpt-3.5-turbo
+
+  # Anthropic models
+  - claude-3-5-sonnet-20240620
+  - claude-3-5-sonnet-20241022
+
+  # MLX models (macOS Apple Silicon)
+  - Qwen3.5-9B-MLX-8bit
+  - Qwen3.8-27B-4bit
+  - Qwen3-Coder-Next-MLX-4bit
+  - GLM-4.7-Flash-MLX-8bit
+  - MiMo-V2.6-Distill-Qwen-9B-MLX-4bit
+
+# ======================= TELEGRAM CONFIGURATION =======================
+
+# Your authorized chat ID (must be positive)
+# Get this by running: ./pi-autopilot discover-chat
+telegram_chat_id: 0
+
+# ======================= OPTIONAL ENVIRONMENT VARIABLES =======================
+#
+# For external providers, use environment variables for API keys:
+#
+#   OPENAI_API_KEY=sk-... ./pi-autopilot run -config config.yaml
+#   ANTHROPIC_API_KEY=sk-... ./pi-autopilot run -config config.yaml
+#
+# Or configure directly in YAML under api_key
