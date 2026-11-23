@@ -139,7 +139,7 @@ func (a *App) prepareIssueBranch(ctx context.Context, issue Issue) error {
 
 func branchFor(number int) string { return "autopilot/issue-" + strconv.Itoa(number) }
 
-func (a *App) publish(ctx context.Context, issue Issue) (int, error) {
+func (a *App) publish(ctx context.Context, s State, issue Issue) (int, error) {
 	branch := branchFor(issue.Number)
 	existingPR, err := a.prForBranch(ctx, branch)
 	if err != nil {
@@ -189,13 +189,13 @@ func (a *App) publish(ctx context.Context, issue Issue) (int, error) {
 	if existingPR > 0 {
 		// Reuse the PR, but refresh its description to keep the closing keyword
 		// and the local evidence correct after an additional repair commit.
-		body := a.prBody(issue)
+		body := a.prBody(ctx, s, issue)
 		if _, err := a.gh(ctx, "pr", "edit", strconv.Itoa(existingPR), "--body", body); err != nil {
 			return 0, err
 		}
 		return existingPR, nil
 	}
-	prBody := a.prBody(issue)
+	prBody := a.prBody(ctx, s, issue)
 	_, err = a.gh(ctx, "pr", "create", "--base", base, "--head", branch, "--title", issue.Title, "--body", prBody)
 	if err != nil {
 		// The network can fail after GitHub created the PR; reconcile before retrying.

@@ -334,7 +334,7 @@ func (a *App) step(ctx context.Context, s State) error {
 		}
 
 	case "publish":
-		pr, err := a.publish(ctx, issue)
+		pr, err := a.publish(ctx, s, issue)
 		if err != nil {
 			return err
 		}
@@ -362,7 +362,7 @@ func (a *App) step(ctx context.Context, s State) error {
 		if err != nil {
 			return err
 		}
-		report := fmt.Sprintf("# PR publication (deterministic)\n\nIssue: %s\nBranch: %s\nBase: %s\nPR: https://github.com/%s/pull/%d\nHEAD: %s\nFingerprint: %s\nBody:\n%s\n", issue.URL, branchFor(issue.Number), p.BaseRefName, a.cfg.Repo, pr, p.HeadRefOid, fingerprint, a.prBody(issue))
+		report := fmt.Sprintf("# PR publication (deterministic)\n\nIssue: %s\nBranch: %s\nBase: %s\nPR: https://github.com/%s/pull/%d\nHEAD: %s\nFingerprint: %s\nBody:\n%s\n", issue.URL, branchFor(issue.Number), p.BaseRefName, a.cfg.Repo, pr, p.HeadRefOid, fingerprint, a.prBody(ctx, s, issue))
 		if err := a.recordHandoff(ctx, s, "publish", "ci", report); err != nil {
 			return err
 		}
