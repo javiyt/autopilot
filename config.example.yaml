@@ -163,6 +163,15 @@ models:
     id: qwen2.5:7b
     thinking: low
 
+  # verify is optional: it inspects the repository's build/CI definitions and
+  # returns the list of local commands the deterministic verifier executes.
+  # An absent or empty entry inherits the plan model; if the model run fails,
+  # the plan's own checks block is used instead.
+  verify:
+    provider: ""
+    id: qwen2.5:7b
+    thinking: low
+
 # ======================= ALLOWED MODELS LIST (Telegram) =======================
 #
 # List of models that can be changed via Telegram (/use <role> <model>)

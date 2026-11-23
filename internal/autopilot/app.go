@@ -197,9 +197,9 @@ func (a *App) Status() string {
 		}
 		return "Autopilot idle; auto-discover mode; waiting for eligible GitHub issues."
 	}
-	status := fmt.Sprintf("Issue #%d: %s\nPhase: %s\nMerge policy: %s\nPaused: %t\nPR: #%d\nRetries: %d\nModels: investigate=%s, plan=%s, implement=%s, review=%s, chat=%s, triage=%s",
+	status := fmt.Sprintf("Issue #%d: %s\nPhase: %s\nMerge policy: %s\nPaused: %t\nPR: #%d\nRetries: %d\nModels: investigate=%s, plan=%s, verify=%s, implement=%s, review=%s, chat=%s, triage=%s",
 		s.Issue.Number, s.Issue.Title, s.Phase, s.MergePolicy, s.Paused, s.PRNumber, s.Attempts[s.Phase], a.modelFor(s, "investigate").ID,
-		a.modelFor(s, "plan").ID, a.modelFor(s, "implement").ID, a.modelFor(s, "review").ID, a.chatModel(s), a.modelFor(s, "triage").ID)
+		a.modelFor(s, "plan").ID, a.modelFor(s, "verify").ID, a.modelFor(s, "implement").ID, a.modelFor(s, "review").ID, a.chatModel(s), a.modelFor(s, "triage").ID)
 	if len(s.Queue) > 0 {
 		status += "\nQueue: " + queueSummary(s.Queue)
 	}
@@ -230,7 +230,7 @@ func (a *App) chatModel(s State) string {
 
 func (a *App) modelFor(s State, role string) ModelProfile {
 	profile := a.cfg.Models[role]
-	if profile.ID == "" && role == "triage" {
+	if profile.ID == "" && (role == "triage" || role == "verify") {
 		profile = a.cfg.Models["plan"]
 	}
 	if override := s.RoleModels[role]; override != "" {

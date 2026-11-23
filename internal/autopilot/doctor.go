@@ -29,10 +29,13 @@ func Doctor(parent context.Context, cfg Config) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Pi model inventory: %w", err)
 	}
-	for _, role := range []string{"investigate", "plan", "implement", "review", "chat", "triage"} {
+	for _, role := range []string{"investigate", "plan", "verify", "implement", "review", "chat", "triage"} {
 		name := cfg.Models[role].ID
-		if !strings.Contains(models, name) {
-			lines = append(lines, "WARNING: model "+name+" not found in pi --list-models (verify the exact ID).")
+		if name == "" && (role == "triage" || role == "verify") {
+			name = "(inherits plan: " + cfg.Models["plan"].ID + ")"
+		}
+		if !strings.Contains(models, cfg.Models[role].ID) && cfg.Models[role].ID != "" {
+			lines = append(lines, "WARNING: model "+cfg.Models[role].ID+" not found in pi --list-models (verify the exact ID).")
 		} else {
 			lines = append(lines, role+" model: "+name)
 		}

@@ -25,7 +25,7 @@ Instead of subagents, the supervisor manages state, tools, artifacts, and transi
 | `investigate` | **Go** collects issue, comments, timeline, PRs, tree, conventions and runs baseline checks; **Pi** analyzes relationships, requirements and code |
 | `plan` | **New Pi** with YAML planning model; must also emit a fenced `checks` block with the local verification commands that reproduce CI |
 | `implement` | **Go** creates/reuses branch; **New Pi** writes code and tests |
-| `local_verify` | **Go + shell** execute `check_commands` plus the plan's `checks` block (deduplicated; the plan block wins when absent), with logs and content fingerprint |
+| `local_verify` | **verify Pi (read-only)** inspects the repository's build/CI definitions and returns the command list (the plan's block is the starting point and the fallback); **Go + shell** then executes `check_commands` plus that list, deduplicated and filtered to canonical entrypoints, with logs and content fingerprint |
 | `review` | **New Pi read-only**, YAML reviewer model and decision `APPROVE` / `REQUEST_CHANGES` |
 | `publish` | **Go + Git + gh** commit, push, and create/update exactly one PR |
 | `ci` | **Go + gh** inspect CI for current SHA; retrieve logs and re-run only demonstrated infrastructure failures |
@@ -281,6 +281,12 @@ models:
     provider: ollama
     id: qwen2.5:7b
     thinking: low
+  # Optional: derives the local check list per repository; inherits the plan
+  # model when absent, and the plan's checks block stands in when the run fails
+  verify:
+    provider: ollama
+    id: qwen2.5:7b
+    thinking: low
 
 # Models allowed via Telegram commands
 allowed_models:
@@ -317,7 +323,7 @@ Bot: Retrying implement with a new Pi session.
 
 ### Available commands
 
-`/begin <repo> [milestone]` (alias `/start`), `/reset`, `/status`, `/models`, `/use <investigate|plan|implement|review|chat|triage> <n>`, `/chat`, `/ask <question>`, `/exit`, `/fix <prompt>`, `/retry`, `/pause`, `/resume` and `/skip`. The bot only accepts messages from the chosen `telegram_chat_id`.
+`/begin <repo> [milestone]` (alias `/start`), `/reset`, `/status`, `/models`, `/use <investigate|plan|verify|implement|review|chat|triage> <n>`, `/chat`, `/ask <question>`, `/exit`, `/fix <prompt>`, `/retry`, `/pause`, `/resume` and `/skip`. The bot only accepts messages from the chosen `telegram_chat_id`.
 
 ### Configuration in config.yaml
 
