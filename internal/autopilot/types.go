@@ -118,9 +118,9 @@ func ReadConfig(path string) (Config, error) {
 	if len(cfg.CheckCommands) == 0 && strings.TrimSpace(cfg.CheckCommand) != "" {
 		cfg.CheckCommands = []string{cfg.CheckCommand}
 	}
-	if len(cfg.CheckCommands) == 0 {
-		return cfg, errors.New("at least one check_commands entry is required; missing checks are not success")
-	}
+	// An empty check_commands list is valid: for a repository chosen at runtime
+	// via /begin the checks come from the plan phase instead. local_verify
+	// still blocks when neither source yields a check, so nothing fakes success.
 	for _, check := range cfg.CheckCommands {
 		if strings.TrimSpace(check) == "" {
 			return cfg, errors.New("check_commands must not contain empty entries")

@@ -185,7 +185,7 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 		}
 		reply(fmt.Sprintf("Starting manual work on repo=%s, milestone=%s. The next issue(s) with label=%q will be processed.", repo, milestone, a.cfg.Label))
 	case "/help":
-		reply("Commands:\n/begin <repo> [milestone]: start manual work on specific repo/milestone\n/status: current issue\n/models: available models\n/use <investigate|plan|implement|review|chat> <number>: change model\n/chat: pause and enter read-only diagnostic chat (subsequent text is a question)\n/ask <question>: one read-only answer\n/exit: exit chat mode\n/fix <prompt>: send recovery instruction and retry blocked issue\n/retry: retry blocked phase\n/pause, /resume: pause/resume between stages\n/skip: skip current blocked issue")
+		reply("Commands:\n/begin <repo> [milestone]: start manual work on specific repo/milestone\n/status: current issue\n/models: available models\n/use <investigate|plan|implement|review|chat|triage> <number>: change model\n/chat: pause and enter read-only diagnostic chat (subsequent text is a question)\n/ask <question>: one read-only answer\n/exit: exit chat mode\n/fix <prompt>: send recovery instruction and retry blocked issue\n/retry: retry blocked phase\n/pause, /resume: pause/resume between stages\n/skip: skip current blocked issue")
 	case "/status":
 		reply(a.Status())
 	case "/models":

@@ -153,6 +153,12 @@ func (a *App) step(ctx context.Context, s State) error {
 			cfgChecks[cmd] = true
 		}
 		checks := mergeChecks(a.cfg.CheckCommands, planChecks)
+		if len(checks) == 0 {
+			// No configured checks and the plan supplied none: a vacuous pass
+			// would fake success, so the phase blocks until an operator adds
+			// check_commands or the plan is redone with a checks block.
+			return errors.New("local verification has no checks: nothing is configured in check_commands and the plan emitted no parsable checks block")
+		}
 		for i, check := range checks {
 			started := time.Now().UTC()
 			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
