@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -523,14 +527,59 @@ func (a *App) complete(issue Issue) error {
 	if err := a.recordIssue("completed.json", issue.Number); err != nil {
 		return err
 	}
+	summary := a.cleanupIssue(issue.Number)
 	result := "merged"
 	if a.snapshot().MergePolicy == "manual" {
 		result = "verified and left open for manual merge"
 	}
-	a.notify(fmt.Sprintf("✅ Issue #%d %s. Moving to the next eligible issue. See report.md.", issue.Number, result))
+	note := "."
+	if summary != "" {
+		note = fmt.Sprintf("; summary kept at %s.", summary)
+	}
+	a.notify(fmt.Sprintf("✅ Issue #%d %s. Disk cleaned up%s Moving to the next eligible issue.", issue.Number, result, note))
 	return a.update(func(s *State) {
 		previousModels, offset, paused := s.RoleModels, s.TelegramOffset, s.Paused
 		*s = DefaultState(a.cfg)
 		s.RoleModels, s.TelegramOffset, s.Paused = previousModels, offset, paused
 	})
+}
+
+// cleanupIssue releases the per-issue disk usage once the delivery is
+// complete: the human-readable report summary moves to the small, permanent
+// completions directory, while the artifact tree (session logs, diffs,
+// checks — the multi-megabyte part) and the dedicated clone are removed.
+// Failures are logged and never surfaced: disk hygiene must not fail a
+// completed delivery. Returns the preserved summary path for the user.
+func (a *App) cleanupIssue(n int) string {
+	summary := ""
+	if text := a.readArtifact(n, "report.md"); text != "" {
+		dir := filepath.Join(a.cfg.StateDir, "completions")
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			dst := filepath.Join(dir, fmt.Sprintf("issue-%d-pr%d.md", n, a.snapshot().PRNumber))
+			if err := os.WriteFile(dst, []byte(text), 0600); err == nil {
+				summary = dst
+				log.Printf("Issue #%d: report summary preserved at %s", n, dst)
+			}
+		}
+	}
+	if artifacts := filepath.Join(a.cfg.StateDir, "artifacts", strconv.Itoa(n)); dirExists(artifacts) {
+		if err := os.RemoveAll(artifacts); err != nil {
+			log.Printf("Issue #%d: artifact cleanup failed: %v", n, err)
+		} else {
+			log.Printf("Issue #%d: artifact tree removed", n)
+		}
+	}
+	if worktree := filepath.Join(a.cfg.StateDir, "worktrees", fmt.Sprintf("issue-%d", n)); dirExists(worktree) {
+		if err := os.RemoveAll(worktree); err != nil {
+			log.Printf("Issue #%d: checkout cleanup failed: %v", n, err)
+		} else {
+			log.Printf("Issue #%d: dedicated checkout removed", n)
+		}
+	}
+	return summary
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
