@@ -27,3 +27,24 @@ func TestInvestigateStatusParser(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewDecisionParser(t *testing.T) {
+	cases := []struct {
+		name   string
+		report string
+		want   string
+	}{
+		{"exact", "DECISION: APPROVE", "DECISION: APPROVE"},
+		{"preamble and final verdict", "analysis...\n\nfiles checked\n\nDECISION: REQUEST_CHANGES", "DECISION: REQUEST_CHANGES"},
+		{"bold and heading", "text\n**DECISION: APPROVE**", "DECISION: APPROVE"},
+		{"last wins over mid mention", "A DECISION: REQUEST_CHANGES would be needed if X.\n\nfinal check done\nDECISION: APPROVE", "DECISION: APPROVE"},
+		{"none", "Since I cannot execute commands, let me compile my review.\n## Summary\n...", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reviewDecision(tc.report); got != tc.want {
+				t.Fatalf("reviewDecision = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

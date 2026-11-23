@@ -103,7 +103,7 @@ func (a *App) handoffContext(s State) string {
 		a.artifact(s.Issue.Number, h.ReportFile), a.artifact(s.Issue.Number, h.StatusFile),
 		h.ReportFile, truncate(report, 12000), truncate(status, 4000))
 	if s.Phase == "review" {
-		context += "Implementation report (" + a.artifact(s.Issue.Number, "implement.md") + "):\n" + truncate(a.readArtifact(s.Issue.Number, "implement.md"), 8000) + "\n"
+		context += "Implementation report (" + a.artifact(s.Issue.Number, "implementation.md") + "):\n" + truncate(a.readArtifact(s.Issue.Number, "implementation.md"), 8000) + "\n"
 	}
 	if s.Phase == "implement" && h.FromPhase != "plan" {
 		context += "Original plan (plan.md):\n" + truncate(a.readArtifact(s.Issue.Number, "plan.md"), 8000) + "\n"
