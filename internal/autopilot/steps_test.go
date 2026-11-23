@@ -4,10 +4,10 @@ import "testing"
 
 func TestInvestigateStatusParser(t *testing.T) {
 	cases := []struct {
-		name     string
-		report   string
-		want     string
-		wantOK   bool
+		name   string
+		report string
+		want   string
+		wantOK bool
 	}{
 		{"exact first line", "STATUS: READY\nrest", "READY", true},
 		{"heading decoration", "## STATUS: READY\ndetails", "READY", true},
