@@ -11,9 +11,24 @@ import (
 	"strings"
 )
 
+func (a *App) ghArgs(args ...string) ([]string, error) {
+	if strings.TrimSpace(a.cfg.Repo) == "" {
+		return nil, errors.New("no repository configured; send /begin <repo> first")
+	}
+	// `repo view` and `repo clone` take the repository as a positional argument
+	// and reject the --repo flag; every other subcommand accepts the flag.
+	if len(args) >= 2 && args[0] == "repo" && (args[1] == "view" || args[1] == "clone") {
+		return append([]string{args[0], args[1], a.cfg.Repo}, args[2:]...), nil
+	}
+	return append(args, "--repo", a.cfg.Repo), nil
+}
+
 func (a *App) gh(ctx context.Context, args ...string) (string, error) {
-	args = append(args, "--repo", a.cfg.Repo)
-	return command(ctx, "", "gh", args...)
+	full, err := a.ghArgs(args...)
+	if err != nil {
+		return "", err
+	}
+	return command(ctx, "", "gh", full...)
 }
 
 // headIssue returns the first queue entry that is neither skipped nor
