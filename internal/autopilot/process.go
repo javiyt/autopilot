@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,12 +77,20 @@ func ClassifyFailure(s string) string {
 }
 
 type piEvent struct {
-	Type         string `json:"type"`
-	Aborted      bool   `json:"aborted"`
-	ErrorMessage string `json:"errorMessage"`
-	FinalError   string `json:"finalError"`
-	Success      *bool  `json:"success"`
-	Message      struct {
+	Type         string          `json:"type"`
+	Aborted      bool            `json:"aborted"`
+	ErrorMessage string          `json:"errorMessage"`
+	FinalError   string          `json:"finalError"`
+	Success      *bool           `json:"success"`
+	ToolName     string          `json:"toolName"`
+	Args         json.RawMessage `json:"args"`
+	Result       struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"result"`
+	Message struct {
 		Role       string `json:"role"`
 		StopReason string `json:"stopReason"`
 		Error      string `json:"errorMessage"`
@@ -107,12 +116,12 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 		result.Err = err
 		return result
 	}
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	sess, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		result.Err = err
 		return result
 	}
-	defer log.Close()
+	defer sess.Close()
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(cfg.StageTimeoutMinutes)*time.Minute)
 	defer cancel()
@@ -125,6 +134,7 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 		args = append(args, "--tools", "read,grep,find,ls,bash,edit,write")
 	}
 	args = append(args, "--", prompt)
+	log.Printf("Pi session starting: role=%s provider=%s model=%s thinking=%s (log: %s)", role, provider, model, thinking, logPath)
 	c := exec.CommandContext(ctx, "pi", args...)
 	c.Dir = cwd
 	stdout, err := c.StdoutPipe()
@@ -158,10 +168,18 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 			line, e := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				lastProgress.Store(time.Now().UnixNano())
-				_, _ = log.Write(line)
+				_, _ = sess.Write(line)
 				var event piEvent
 				if json.Unmarshal(bytes.TrimSpace(line), &event) == nil {
 					switch event.Type {
+					case "tool_execution_start":
+						log.Printf("[pi %s] -> tool %s %s", role, event.ToolName, truncate(strings.ReplaceAll(string(event.Args), "\n", " "), 140))
+					case "tool_execution_end":
+						n := 0
+						for _, block := range event.Result.Content {
+							n += len(block.Text)
+						}
+						log.Printf("[pi %s] <- tool %s finished (%d bytes)", role, event.ToolName, n)
 					case "message_end":
 						if event.Message.Role == "assistant" {
 							stopReason = event.Message.StopReason
@@ -172,6 +190,9 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 								if block.Type == "text" && block.Text != "" {
 									result.Text = block.Text
 								}
+							}
+							if result.Text != "" {
+								log.Printf("[pi %s] assistant: %s", role, truncate(strings.ReplaceAll(result.Text, "\n", " "), 160))
 							}
 						}
 					case "compaction_end":
