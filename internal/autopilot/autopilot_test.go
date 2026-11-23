@@ -88,7 +88,9 @@ func TestCheckSummary(t *testing.T) {
 		{`[{"name":"unit","bucket":"pass"}]`, true, false, false},
 		{`[{"name":"unit","bucket":"pending"}]`, false, true, false},
 		{`[{"name":"unit","bucket":"fail","state":"FAILURE"}]`, false, false, true},
-		{`[{"name":"skip","bucket":"skipping"}]`, false, true, false},
+		{`[{"name":"skip","bucket":"skipping"}]`, false, false, false},
+		{`[{"name":"Build","bucket":"pass","state":"SUCCESS"},{"name":"Build site","bucket":"pass","state":"SUCCESS"},{"name":"Validate RSS sources","bucket":"pass","state":"SUCCESS"},{"name":"Scheduler worker","bucket":"pass","state":"SUCCESS"},{"name":"automerge","bucket":"skipping","state":"SKIPPED"}]`, true, false, false},
+		{`[{"name":"unit","bucket":"pass"},{"name":"automerge","bucket":"skipping"},{"name":"lint","bucket":"pending"}]`, false, true, false},
 		{`[]`, false, false, false},
 	}
 	for _, c := range cases {

@@ -245,16 +245,23 @@ func ParseChecks(data []byte) (CheckSummary, error) {
 	if err := json.Unmarshal(data, &checks); err != nil {
 		return CheckSummary{}, err
 	}
-	status := CheckSummary{Success: len(checks) > 0}
+	status := CheckSummary{}
 	for _, c := range checks {
 		switch c.Bucket {
 		case "pass":
+			status.Success = true
 		case "fail", "cancel":
 			status.Failed, status.Success = true, false
 			status.Details += c.Name + ": " + c.State + "; "
 			if c.Link != "" {
 				status.FailedLinks = append(status.FailedLinks, c.Link)
 			}
+		case "skipping", "neutral":
+			// GitHub explicitly decided this check does not apply (conditional
+			// workflow, e.g. dependabot-only jobs): it must not hold the PR open,
+			// but skipped checks alone must not grant green either; at least one
+			// executed pass is required for success.
+			status.Details += c.Name + ": " + c.State + " (skipped, non-blocking); "
 		default:
 			status.Pending, status.Success = true, false
 			status.Details += c.Name + ": " + c.Bucket + "/" + c.State + "; "
