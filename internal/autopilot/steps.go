@@ -5,9 +5,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// parsePlanChecks extracts the shell commands the plan proposed under its
+// fenced "checks" block. A missing or empty block yields nil, in which case
+// the configured check_commands remain the only local verification.
+func parsePlanChecks(planText string) []string {
+	block := regexp.MustCompile("(?is)```checks[ \t]*\r?\n(.*?)```")
+	match := block.FindStringSubmatch(planText)
+	if match == nil {
+		return nil
+	}
+	var checks []string
+	for _, line := range strings.Split(match[1], "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		checks = append(checks, line)
+	}
+	if len(checks) == 0 {
+		return nil
+	}
+	return checks
+}
+
+// mergeChecks joins the configured checks with the plan-derived ones, keeping
+// the configured checks first and dropping exact duplicates.
+func mergeChecks(configured, plan []string) []string {
+	seen := map[string]bool{}
+	var checks []string
+	for _, cmd := range append(append([]string{}, configured...), plan...) {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" || seen[cmd] {
+			continue
+		}
+		seen[cmd] = true
+		checks = append(checks, cmd)
+	}
+	return checks
+}
 
 // The transition graph is intentionally fixed. Content from an issue, a PR or
 // a model's response cannot add edges, skip checks, or enable auto-merge.
@@ -46,12 +86,25 @@ func (a *App) step(ctx context.Context, s State) error {
 		return a.transition("plan")
 
 	case "plan":
-		prompt := "You are a software architect. PLANNING ONLY: read the issue.json, context.md and source; do not edit code. Write an actionable plan with requirements-to-tests mapping, files/interfaces, smallest safe solution, security, risks, rollback, local checks and conditions requiring replanning. Use numbered acceptance criteria. No implementation or GitHub mutation.\nIssue: " + issue.URL + "\nContext artifact: " + a.artifact(issue.Number, "context.md")
+		prompt := "You are a software architect. PLANNING ONLY: read the issue.json, context.md and source; do not edit code. Write an actionable plan with requirements-to-tests mapping, files/interfaces, smallest safe solution, security, risks, rollback and conditions requiring replanning. Use numbered acceptance criteria. Before the final summary include a section titled exactly \"## Local verification\". Inside that section place one fenced code block tagged \"checks\" that lists, one shell command per line, the commands that reproduce this repository's CI locally. Derive them from the CI definitions and repository conventions cited in context.md; every line must be a single command runnable from the repository root, because the supervisor executes exactly these commands plus the configured checks in the local verification phase. No implementation or GitHub mutation.\nIssue: " + issue.URL + "\nContext artifact: " + a.artifact(issue.Number, "context.md")
 		plan, err := a.runStage(ctx, s, "plan", prompt, true)
 		if err != nil {
 			return err
 		}
-		if err = a.recordHandoff(ctx, s, "plan", "implement", plan); err != nil {
+		planChecks := parsePlanChecks(plan)
+		if planChecks == nil {
+			planChecks = []string{}
+		}
+		if err = atomicJSON(a.artifact(issue.Number, "plan-checks.json"), planChecks); err != nil {
+			return err
+		}
+		report := plan
+		if len(planChecks) > 0 {
+			report += "\n\n## Parsed local verification commands\n" + strings.Join(planChecks, "\n") + "\n"
+		} else {
+			report += "\n\n## Parsed local verification commands\nplan supplied no parsable checks block; the configured check_commands are authoritative.\n"
+		}
+		if err = a.recordHandoff(ctx, s, "plan", "implement", report); err != nil {
 			return err
 		}
 		return a.transition("implement")
@@ -89,7 +142,18 @@ func (a *App) step(ctx context.Context, s State) error {
 				return fmt.Errorf("invalid baseline evidence: %w", err)
 			}
 		}
-		for i, check := range a.cfg.CheckCommands {
+		planChecks := []string{}
+		if data := a.readArtifact(issue.Number, "plan-checks.json"); data != "" {
+			if err := json.Unmarshal([]byte(data), &planChecks); err != nil {
+				planChecks = []string{}
+			}
+		}
+		cfgChecks := map[string]bool{}
+		for _, cmd := range a.cfg.CheckCommands {
+			cfgChecks[cmd] = true
+		}
+		checks := mergeChecks(a.cfg.CheckCommands, planChecks)
+		for i, check := range checks {
 			started := time.Now().UTC()
 			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 			out, err := command(checkCtx, a.checkout, "sh", "-c", check)
@@ -99,16 +163,24 @@ func (a *App) step(ctx context.Context, s State) error {
 			if err != nil {
 				failed = true
 				full += "failure: " + err.Error() + "\n"
-				for _, previous := range baseline {
-					if previous.Command == check && previous.Failed {
-						baselineFailed = true
+				// Only configured checks were recorded in the pre-implementation
+				// baseline; a plan-derived check that fails here is a new failure.
+				if cfgChecks[check] {
+					for _, previous := range baseline {
+						if previous.Command == check && previous.Failed {
+							baselineFailed = true
+						}
 					}
 				}
 			}
 			if writeErr := a.storeArtifact(issue.Number, logName, full); writeErr != nil {
 				return writeErr
 			}
-			fmt.Fprintf(&report, "- `%s`: %s (log: %s)\n", check, map[bool]string{true: "FAIL", false: "PASS"}[err != nil], a.artifact(issue.Number, logName))
+			source := "plan"
+			if cfgChecks[check] {
+				source = "config"
+			}
+			fmt.Fprintf(&report, "- `%s` (%s): %s (log: %s)\n", check, source, map[bool]string{true: "FAIL", false: "PASS"}[err != nil], a.artifact(issue.Number, logName))
 		}
 		fingerprint, err := a.diffFingerprint(ctx)
 		if err != nil {

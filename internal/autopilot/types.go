@@ -25,10 +25,12 @@ type ModelProfile struct {
 }
 
 type Config struct {
-	Repo                string                  `yaml:"repo"`
-	Milestone           string                  `yaml:"milestone"`
-	Label               string                  `yaml:"label"`
-	StateDir            string                  `yaml:"state_dir"`
+	Repo      string `yaml:"repo"`
+	Milestone string `yaml:"milestone"`
+	Label     string `yaml:"label"`
+	StateDir  string `yaml:"state_dir"`
+	// Path is set by ReadConfig to the absolute configuration file location.
+	Path                string
 	PollSeconds         int                     `yaml:"poll_seconds"`
 	IdleTimeoutMinutes  int                     `yaml:"idle_timeout_minutes"`
 	StageTimeoutMinutes int                     `yaml:"stage_timeout_minutes"`
@@ -68,11 +70,12 @@ func ReadConfig(path string) (Config, error) {
 	if err = decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("invalid config: %w", err)
 	}
-	
+
 	// Expand environment variables before validation
 	cfg = cfg.ExpandEnvironmentVariables()
-	
-	if !repoPattern.MatchString(cfg.Repo) {
+
+	// An empty repo is valid: the supervisor parks until /begin provides one.
+	if cfg.Repo != "" && !repoPattern.MatchString(cfg.Repo) {
 		return cfg, errors.New("repo must be owner/repo")
 	}
 	if cfg.StateDir == "" {
@@ -87,6 +90,7 @@ func ReadConfig(path string) (Config, error) {
 		return cfg, err
 	}
 	cfg.StateDir = absStateDir
+	cfg.Path = path
 	if cfg.PollSeconds <= 0 {
 		cfg.PollSeconds = 60
 	}
@@ -144,10 +148,28 @@ func ReadConfig(path string) (Config, error) {
 		}
 		cfg.Models[role] = profile
 	}
+	// triage is optional: an absent entry inherits the plan profile so that
+	// existing configurations keep loading unchanged.
+	if profile, ok := cfg.Models["triage"]; !ok || strings.TrimSpace(profile.ID) == "" {
+		cfg.Models["triage"] = cfg.Models["plan"]
+	} else {
+		if profile.Provider == "" {
+			profile.Provider, _, _ = cfg.DetectProvider("triage")
+		}
+		if profile.Thinking == "" {
+			profile.Thinking = "off"
+		}
+		switch profile.Thinking {
+		case "off", "minimal", "low", "medium", "high", "xhigh", "max":
+		default:
+			return cfg, fmt.Errorf("models.triage.thinking is invalid: %q", profile.Thinking)
+		}
+		cfg.Models["triage"] = profile
+	}
 	if len(cfg.AllowedModels) == 0 {
 		return cfg, errors.New("allowed_models must have at least one model")
 	}
-	for _, role := range []string{"investigate", "plan", "implement", "review", "chat"} {
+	for _, role := range []string{"investigate", "plan", "implement", "review", "chat", "triage"} {
 		if !cfg.ModelAllowed(cfg.Models[role].ID) {
 			return cfg, fmt.Errorf("model %q is not in allowed_models", cfg.Models[role].ID)
 		}
@@ -241,7 +263,7 @@ func parseEnvPattern(s string) (string, string, bool) {
 	}
 
 	inner := s[2 : len(s)-1]
-	
+
 	// Check for default value pattern: VAR_NAME:-default
 	if idx := strings.Index(inner, ":-"); idx != -1 {
 		return inner[:idx], inner[idx+2:], true
@@ -260,7 +282,7 @@ func parseEnvInt(s string, defaultValue int) int {
 	if envVal == "" {
 		return defaultValue
 	}
-	
+
 	num, err := strconv.Atoi(strings.TrimSpace(envVal))
 	if err != nil {
 		return defaultValue
@@ -277,7 +299,7 @@ func parseEnvBool(s string, defaultValue bool) bool {
 	if envVal == "" {
 		return defaultValue
 	}
-	
+
 	if strings.ToLower(strings.TrimSpace(envVal)) == "true" {
 		return true
 	}
@@ -297,7 +319,7 @@ func (c Config) applyManualConfig(s *State) error {
 			}
 		}
 	}
-	
+
 	// Clear state issue and set to waiting
 	s.Issue = Issue{}
 	s.Phase = "waiting_for_start"
@@ -308,7 +330,7 @@ func (c Config) applyManualConfig(s *State) error {
 	s.Attempts = map[string]int{}
 	s.StageRuns = map[string]int{}
 	s.CIReruns = map[string]int{}
-	
+
 	return nil
 }
 
@@ -386,8 +408,14 @@ type Issue struct {
 }
 
 type State struct {
-	Issue                Issue             `json:"issue"`
-	Phase                string            `json:"phase"`
+	Issue Issue  `json:"issue"`
+	Phase string `json:"phase"`
+	// Repo and Milestone persist the target of a /begin so a supervisor
+	// restarted with an empty configured repo resumes the same repository.
+	Repo                 string            `json:"repo,omitempty"`
+	Milestone            string            `json:"milestone,omitempty"`
+	Queue                []int             `json:"queue,omitempty"`
+	NoWorkNotified       bool              `json:"no_work_notified,omitempty"`
 	BlockedPhase         string            `json:"blocked_phase,omitempty"`
 	Attempts             map[string]int    `json:"attempts"`
 	RoleModels           map[string]string `json:"role_models"`

@@ -1,12 +1,15 @@
 # Pi Autopilot — GitHub Delivery workflow supervisor
 
-Go supervisor for managing GitHub delivery workflow via Pi (<https://pi.dev>). Reproduces the ten stages and main handoffs from the [javiyt/pi-github-delivery](https://github.com/javiyt/pi-github-delivery) workflow (reference: `resources/workflow/workflows/GitHubIssueDelivery.yaml`, branch `main`, commit `09c5c2744dabad1a654320da0cb65818fb3f3832`).
+Go supervisor for managing GitHub delivery workflow via Pi (<https://pi.dev>). Receives a repository (and optional milestone) through Telegram, orders its open issues, then reproduces the ten stages and main handoffs from the [javiyt/pi-github-delivery](https://github.com/javiyt/pi-github-delivery) workflow (reference: `resources/workflow/workflows/GitHubIssueDelivery.yaml`, branch `main`, commit `09c5c2744dabad1a654320da0cb65818fb3f3832`).
 
 ## Features
 
-- **Cross-platform**: Runs on Linux, macOS, and Windows with support for multiple model providers
+- **Task ordering**: a triage phase lists every eligible open issue with `gh`, parses dependency hints from issue bodies, and asks one LLM call for the execution order; invalid answers fall back to the deterministic topological order, and the queue is persisted in state
+- **Runs as a system service**: `pi-autopilot service install` registers a user-level LaunchAgent (macOS) or systemd user unit (Linux) that restarts on exit and resumes from `state.json` after a crash
+- **Cross-platform**: Runs on Linux and macOS with support for multiple model providers
 - **Automatic state management**: Manages flow between 10 workflow stages
-- **Telegram integration**: Interactive control and real-time diagnostics
+- **Telegram integration**: `/begin <repo> [milestone]`, interactive control and real-time diagnostics
+- **Idle waiting**: when the repository has no eligible open issues it notifies once and waits, starting automatically when work appears
 - **Cross-platform model support**: Auto-detects appropriate provider based on operating system
 
 ## Architecture
@@ -17,11 +20,12 @@ Instead of subagents, the supervisor manages state, tools, artifacts, and transi
 
 | Original stage | Responsible component |
 | --- | --- |
+| `triage` | **Go + gh** list every eligible open issue (optional milestone/label filter); **one Pi call** returns the ordered queue as strict JSON; any unusable answer falls back to the deterministic topological order (parsed dependencies, then issue number). The queue persists in `state.json` and drives all issue selection |
 | `repository_setup` | **Go + Git + gh**: clone if missing, validate origin/default, fetch, FF-only, confirm orphaned local branches |
 | `investigate` | **Go** collects issue, comments, timeline, PRs, tree, conventions and runs baseline checks; **Pi** analyzes relationships, requirements and code |
-| `plan` | **New Pi** with YAML planning model |
+| `plan` | **New Pi** with YAML planning model; must also emit a fenced `checks` block with the local verification commands that reproduce CI |
 | `implement` | **Go** creates/reuses branch; **New Pi** writes code and tests |
-| `local_verify` | **Go + shell** execute all `check_commands` with logs and content fingerprint |
+| `local_verify` | **Go + shell** execute `check_commands` plus the plan's `checks` block (deduplicated; the plan block wins when absent), with logs and content fingerprint |
 | `review` | **New Pi read-only**, YAML reviewer model and decision `APPROVE` / `REQUEST_CHANGES` |
 | `publish` | **Go + Git + gh** commit, push, and create/update exactly one PR |
 | `ci` | **Go + gh** inspect CI for current SHA; retrieve logs and re-run only demonstrated infrastructure failures |
@@ -272,6 +276,11 @@ models:
     provider: ollama
     id: qwen2.5:7b
     thinking: low
+  # Optional: orders the open-issue queue; inherits the plan model when absent
+  triage:
+    provider: ollama
+    id: qwen2.5:7b
+    thinking: low
 
 # Models allowed via Telegram commands
 allowed_models:
@@ -308,7 +317,7 @@ Bot: Retrying implement with a new Pi session.
 
 ### Available commands
 
-`/begin <repo> [milestone]`, `/reset`, `/status`, `/models`, `/use <investigate|plan|implement|review|chat> <n>`, `/chat`, `/ask <question>`, `/exit`, `/fix <prompt>`, `/retry`, `/pause`, `/resume` and `/skip`. The bot only accepts messages from the chosen `telegram_chat_id`.
+`/begin <repo> [milestone]` (alias `/start`), `/reset`, `/status`, `/models`, `/use <investigate|plan|implement|review|chat|triage> <n>`, `/chat`, `/ask <question>`, `/exit`, `/fix <prompt>`, `/retry`, `/pause`, `/resume` and `/skip`. The bot only accepts messages from the chosen `telegram_chat_id`.
 
 ### Configuration in config.yaml
 
@@ -324,7 +333,8 @@ Pi Autopilot can run in **manual mode** where it waits for a Telegram command to
 - If `config.yaml` has `repo: ""` and no issue state is saved, autopilot enters `waiting_for_start` phase
 - It polls for Telegram messages but does NOT auto-discover GitHub issues
 - Use `/begin <repo> [milestone]` to begin work
-- When `/begin` is received, autopilot processes the next issue with that repo/milestone label
+- When `/begin` is received, autopilot runs triage: it lists every open issue of that repository, orders the queue, and starts the first one; a running issue is backed up and the queue restarts
+- When the queue empties it sends one "no work" notification and keeps polling silently, starting automatically when eligible issues appear
 
 **Usage:**
 
@@ -393,7 +403,7 @@ Processes one issue and exits. Useful for testing.
 ./pi-autopilot run -config config.yaml
 ```
 
-Will continue processing open issues with the `agent-ready` label in ascending order.
+Triage orders the open issues (LLM order, deterministic fallback) and the supervisor works through the queue until it is empty; it then notifies once and waits.
 
 ### Interactive run with Telegram
 
@@ -401,6 +411,24 @@ Will continue processing open issues with the `agent-ready` label in ascending o
 ./pi-autopilot run -config config.yaml
 # The bot will notify you in Telegram when intervention is needed
 ```
+
+## System service (user-level, no root)
+
+The supervisor is designed to run unattended as a *user-level* system service: `gh` authentication, model servers, and credentials are per-user, so no `sudo` is needed.
+
+```bash
+export PI_AUTOPILOT_TELEGRAM_TOKEN='YOUR_BOT_TOKEN'
+
+pi-autopilot service install -config config.yaml   # write the unit and start it
+pi-autopilot service status -config config.yaml
+pi-autopilot service stop
+pi-autopilot service uninstall
+```
+
+- **macOS**: writes `~/Library/LaunchAgents/com.javi.pi-autopilot.plist` (launchd: `RunAtLoad` + `KeepAlive`), captures the current `PATH` and the bot token in the unit, and logs to `state_dir/service-logs/`.
+- **Linux**: writes `~/.config/systemd/user/pi-autopilot.service` (`Restart=always`), enables it for your user session. For boot start without a login session run `loginctl enable-linger`.
+
+Crashes and machine reboots are covered: the unit restarts the process and the supervisor resumes from `state.json`.
 
 ## Merge policies
 
@@ -423,7 +451,7 @@ The merge policy for an issue remains **immutable once started**. Changing confi
 
 ## Persistence and resumption
 
-`state_dir/state.json` preserves issue, phase, retries, Telegram temporary models, merge policy, reviewed fingerprint, published head, and CI counter.
+`state_dir/state.json` preserves issue, phase, triage queue, retries, Telegram temporary models, merge policy, reviewed fingerprint, published head, and CI counter.
 
 Canonical reports live in `state_dir/artifacts/N/`; each successful attempt preserves its own Markdown and immutable handoff within `attempts/<stage>/`. Complete Pi JSONL streams remain in `sessions/` with unique names.
 

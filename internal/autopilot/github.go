@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -17,32 +16,24 @@ func (a *App) gh(ctx context.Context, args ...string) (string, error) {
 	return command(ctx, "", "gh", args...)
 }
 
-func (a *App) nextIssue(ctx context.Context) (*Issue, error) {
-	args := []string{"issue", "list", "--state", "open", "--limit", "1000", "--json", "number,title,body,url,state,milestone"}
-	if a.cfg.Milestone != "" {
-		args = append(args, "--milestone", a.cfg.Milestone)
-	}
-	if a.cfg.Label != "" {
-		args = append(args, "--label", a.cfg.Label)
-	}
-	out, err := a.gh(ctx, args...)
-	if err != nil {
-		return nil, err
-	}
-	var issues []Issue
-	if err = json.Unmarshal([]byte(out), &issues); err != nil {
-		return nil, err
-	}
-	sort.Slice(issues, func(i, j int) bool { return issues[i].Number < issues[j].Number })
+// headIssue returns the first queue entry that is neither skipped nor
+// completed. Skipped and completed issues are never silently re-executed.
+func (a *App) headIssue(issues []QueueIssue, queue []int) (Issue, bool) {
+	byNumber := map[int]QueueIssue{}
 	for _, issue := range issues {
-		// Ignore issues explicitly excluded by the operator; a "blocked" issue
-		// must be handled via Telegram, never silently replaced by a later one.
-		if a.isSkipped(issue.Number) || a.isCompleted(issue.Number) {
+		byNumber[issue.Number] = issue
+	}
+	for _, n := range queue {
+		if a.isSkipped(n) || a.isCompleted(n) {
 			continue
 		}
-		return &issue, nil
+		q, ok := byNumber[n]
+		if !ok {
+			continue
+		}
+		return Issue{Number: q.Number, Title: q.Title, Body: q.Body, URL: q.URL, Milestone: q.Milestone}, true
 	}
-	return nil, nil
+	return Issue{}, false
 }
 
 func (a *App) isSkipped(number int) bool {

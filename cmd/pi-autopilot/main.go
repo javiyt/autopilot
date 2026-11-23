@@ -16,11 +16,12 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|status|doctor|discover-chat> -config /path/config.yaml [options]")
+	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|status|doctor|discover-chat|service> -config /path/config.yaml [options]")
 	fmt.Fprintln(os.Stderr, "  run: optional -once to process one issue then exit")
 	fmt.Fprintln(os.Stderr, "  status: show durable state without contacting Pi or GitHub")
 	fmt.Fprintln(os.Stderr, "  doctor: check local binaries and registered Pi models")
 	fmt.Fprintln(os.Stderr, "  discover-chat: show Telegram chat IDs after sending /start to your bot")
+	fmt.Fprintln(os.Stderr, "  service <install|uninstall|start|stop|status>: manage the user-level system service (launchd or systemd user)")
 }
 
 func main() {
@@ -57,6 +58,48 @@ func main() {
 		for _, id := range ids {
 			fmt.Println(id)
 		}
+		return
+	}
+
+	if action == "service" {
+		sub := "help"
+		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
+			sub = os.Args[2]
+		}
+		var (
+			out string
+			err error
+		)
+		switch sub {
+		case "install":
+			if token == "" {
+				log.Fatal("PI_AUTOPILOT_TELEGRAM_TOKEN is required for service install; the unit stores it for unattended runs")
+			}
+			absolutePath, err := filepath.Abs(*configPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			cfg, err := autopilot.ReadConfig(absolutePath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			out, err = autopilot.ServiceInstall(cfg, token)
+		case "uninstall":
+			out, err = autopilot.ServiceUninstall()
+		case "start":
+			out, err = autopilot.ServiceStart()
+		case "stop":
+			out, err = autopilot.ServiceStop()
+		case "status", "":
+			out, err = autopilot.ServiceStatus()
+		default:
+			usage()
+			os.Exit(2)
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(out)
 		return
 	}
 

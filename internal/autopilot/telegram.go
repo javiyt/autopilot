@@ -91,7 +91,7 @@ type telegramUpdate struct {
 	Message  struct {
 		From struct {
 			UserID int64 `json:"id"`
-			IsBot  bool   `json:"is_bot"`
+			IsBot  bool  `json:"is_bot"`
 		} `json:"from"`
 		Chat struct {
 			ID int64 `json:"id"`
@@ -158,20 +158,20 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 	if len(parts) == 0 {
 		return
 	}
-	
+
 	// Check if user is authorized
 	if a.cfg.AuthorizedUserID > 0 && userID != a.cfg.AuthorizedUserID {
 		_ = a.telegram.Send(ctx, "Access denied. Only authorized users can control this bot.")
 		return
 	}
-	
+
 	cmd := strings.SplitN(parts[0], "@", 2)[0]
 	rest := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
 	reply := func(s string) { a.notify(s) }
 	switch cmd {
-	case "/start":
+	case "/begin", "/start":
 		if len(parts) < 2 {
-			reply("Usage: /start <repo> [milestone]")
+			reply("Usage: /begin <repo> [milestone]")
 			return
 		}
 		repo := parts[1]
@@ -200,8 +200,8 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 			return
 		}
 		role := parts[1]
-		if role != "investigate" && role != "plan" && role != "implement" && role != "review" && role != "chat" {
-			reply("Unknown model role. Use investigate, plan, implement, review or chat. Non-LLM stages do not select a model.")
+		if role != "investigate" && role != "plan" && role != "implement" && role != "review" && role != "chat" && role != "triage" {
+			reply("Unknown model role. Use investigate, plan, implement, review, chat or triage. Non-LLM stages do not select a model.")
 			return
 		}
 		index, err := strconv.Atoi(parts[2])

@@ -18,8 +18,9 @@ repo: OWNER/REPO
 # GitHub milestone label (optional)
 milestone: ""
 
-# Issue label that triggers autopilot (must exist in repo)
-label: agent-ready
+# Issue label filter (optional).
+# Empty string = every open issue (no filter). Set e.g. `agent-ready` to narrow the queue.
+label: ""
 
 # Directory for state and artifacts (relative to config)
 state_dir: ./autopilot-state
@@ -151,6 +152,13 @@ models:
     thinking: low
 
   chat:
+    provider: ""
+    id: qwen2.5:7b
+    thinking: low
+
+  # triage is optional: it reorders the open issues into the execution queue.
+  # An absent or empty entry inherits the plan model, so existing configs keep working.
+  triage:
     provider: ""
     id: qwen2.5:7b
     thinking: low
