@@ -1,0 +1,29 @@
+package autopilot
+
+import "testing"
+
+func TestInvestigateStatusParser(t *testing.T) {
+	cases := []struct {
+		name     string
+		report   string
+		want     string
+		wantOK   bool
+	}{
+		{"exact first line", "STATUS: READY\nrest", "READY", true},
+		{"heading decoration", "## STATUS: READY\ndetails", "READY", true},
+		{"bold decoration", "**STATUS: READY**\ndetails", "READY", true},
+		{"preamble before marker", "Now I have enough context to compile a report:\n\nSTATUS: READY\n\n# Report", "READY", true},
+		{"cr line endings", "intro\r\nSTATUS: READY\r\ndetails", "READY", true},
+		{"blocked wins when first", "Preamble\nSTATUS: BLOCKED\nlater I found STATUS: READY", "BLOCKED", true},
+		{"discussion of marker is not a marker", "The issue says to print STATUS: READY when done.\nMore analysis", "", false},
+		{"no marker", "Just a plain report", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := investigateStatus(tc.report)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("investigateStatus = (%q, %t), want (%q, %t)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
