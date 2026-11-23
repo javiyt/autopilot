@@ -160,10 +160,20 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	var sawSettled bool
 	var wasAborted bool
 	var readErr error
+	var loopDetected atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		reader := bufio.NewReader(stdout)
+		var lastAssistantText, prevPair, prevText string
+		var pairCount, textCount int
+		abortLoop := func(what string, count int) {
+			if !loopDetected.Load() {
+				loopDetected.Store(true)
+				log.Printf("[pi %s] repetition loop detected (%d identical %s); aborting session", role, count, what)
+				cancel()
+			}
+		}
 		for {
 			line, e := reader.ReadBytes('\n')
 			if len(line) > 0 {
@@ -174,6 +184,15 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 					switch event.Type {
 					case "tool_execution_start":
 						log.Printf("[pi %s] -> tool %s %s", role, event.ToolName, truncate(strings.ReplaceAll(string(event.Args), "\n", " "), 140))
+						pair := lastAssistantText + "\x00" + event.ToolName + " " + string(event.Args)
+						if pair == prevPair {
+							pairCount++
+						} else {
+							prevPair, pairCount = pair, 1
+						}
+						if pairCount >= 8 {
+							abortLoop("turns", pairCount)
+						}
 					case "tool_execution_end":
 						n := 0
 						for _, block := range event.Result.Content {
@@ -193,7 +212,16 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 							}
 							if result.Text != "" {
 								log.Printf("[pi %s] assistant: %s", role, truncate(strings.ReplaceAll(result.Text, "\n", " "), 160))
+								if result.Text == prevText {
+									textCount++
+								} else {
+									prevText, textCount = result.Text, 1
+								}
+								if textCount >= 8 {
+									abortLoop("assistant turns", textCount)
+								}
 							}
+							lastAssistantText = result.Text
 						}
 					case "compaction_end":
 						if event.ErrorMessage != "" {
@@ -266,7 +294,9 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	mu.Lock()
 	stderrText := stderrBuf.String()
 	mu.Unlock()
-	if idleExceeded {
+	if loopDetected.Load() {
+		result.Err = fmt.Errorf("repetition loop detected: the model repeated the same turn 8 consecutive times; session aborted (log: %s)", logPath)
+	} else if idleExceeded {
 		result.Err = errors.New("Pi did not emit output within the idle timeout")
 	} else if ctx.Err() != nil {
 		result.Err = fmt.Errorf("Pi stopped: %w", ctx.Err())
@@ -282,7 +312,11 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 		result.Err = errors.New("Pi returned no final assistant text")
 	}
 	if result.Err != nil {
-		result.FailureKind = ClassifyFailure(result.Err.Error() + " " + stderrText + " " + finalError)
+		kind := result.FailureKind
+		if kind == "" {
+			kind = ClassifyFailure(result.Err.Error() + " " + stderrText + " " + finalError)
+		}
+		result.FailureKind = kind
 		result.Err = fmt.Errorf("%w (%s): %s", result.Err, result.FailureKind, truncate(stderrText+" "+finalError, 1300))
 	}
 	return result
