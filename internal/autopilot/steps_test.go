@@ -15,6 +15,8 @@ func TestInvestigateStatusParser(t *testing.T) {
 		{"preamble before marker", "Now I have enough context to compile a report:\n\nSTATUS: READY\n\n# Report", "READY", true},
 		{"cr line endings", "intro\r\nSTATUS: READY\r\ndetails", "READY", true},
 		{"blocked wins when first", "Preamble\nSTATUS: BLOCKED\nlater I found STATUS: READY", "BLOCKED", true},
+		{"mixed case heading as in issue 157 report", "Based on my investigation...\n\n---\n\n## INVESTIGATION REPORT: Issue #157\n\n### Status: BLOCKED\n\nThe issue is ...", "BLOCKED", true},
+		{"lowercase with trailing period", "intro\nstatus: ready.\ndetails", "READY", true},
 		{"discussion of marker is not a marker", "The issue says to print STATUS: READY when done.\nMore analysis", "", false},
 		{"no marker", "Just a plain report", "", false},
 	}
