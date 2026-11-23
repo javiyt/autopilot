@@ -89,13 +89,13 @@ func (t *Telegram) Send(ctx context.Context, message string) error {
 type telegramUpdate struct {
 	UpdateID int64 `json:"update_id"`
 	Message  struct {
-		UserID int64 `json:"from"`
-		Chat   struct {
+		From struct {
+			UserID int64 `json:"id"`
+			IsBot  bool   `json:"is_bot"`
+		} `json:"from"`
+		Chat struct {
 			ID int64 `json:"id"`
 		} `json:"chat"`
-		From  struct {
-			IsBot bool `json:"is_bot"`
-		} `json:"from"`
 		Text string `json:"text"`
 	} `json:"message"`
 }
@@ -123,7 +123,7 @@ func (t *Telegram) Poll(ctx context.Context, app *App) {
 			}
 			// Consume even unauthorized messages, but NEVER execute or reply to them.
 			if u.Message.Chat.ID == t.chatID && !u.Message.From.IsBot && strings.TrimSpace(u.Message.Text) != "" {
-				app.HandleTelegram(ctx, u.Message.UserID, u.Message.Text)
+				app.HandleTelegram(ctx, u.Message.From.UserID, u.Message.Text)
 			}
 			if err := app.update(func(s *State) { s.TelegramOffset = u.UpdateID + 1 }); err != nil {
 				log.Printf("Unable to persist Telegram offset: %v", err)

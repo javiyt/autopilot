@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,9 +187,12 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 				}
 			}
 			if e != nil {
-				if !errors.Is(e, io.EOF) {
+				// file already closed is expected when process exits cleanly after emitting events
+				if !strings.Contains(e.Error(), "file already closed") {
 					readErr = e
+					return
 				}
+				// Normal stream closure from process exit, no error
 				return
 			}
 		}

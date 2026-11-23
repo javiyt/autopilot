@@ -151,10 +151,8 @@ func TestSavedStateSurvivesRestartAndTelegramFix(t *testing.T) {
 func TestPiCompletionAfterIntermediateCompactionFailure(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "pi")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' '{\"type\":\"compaction_end\",\"errorMessage\":\"context length exceeded\"}' " +
-		"'{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"VERDICT: PASS\"}]}}' " +
-		"'{\"type\":\"agent_settled\",\"aborted\":false}'\n"
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"compaction_end","errorMessage":"context length exceeded"}' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"VERDICT: PASS"}]} }' '{"type":"agent_settled","aborted":false}'`
 	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
