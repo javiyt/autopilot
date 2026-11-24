@@ -76,6 +76,31 @@ func ClassifyFailure(s string) string {
 	return "execution"
 }
 
+type messageBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+// loopTurnKey is the loop-detection key of one assistant turn: its text plus
+// the name and arguments of every tool call. A repeating preamble over
+// different reads produces different keys (progress); only an identical
+// action repeated 8 times is a loop. A text-less, call-less turn has an empty
+// key and never counts.
+func loopTurnKey(text string, blocks []messageBlock) string {
+	key := text
+	for _, b := range blocks {
+		if b.Type == "toolCall" {
+			key += "\x00" + b.Name + " " + string(b.Arguments)
+		}
+	}
+	if key == "" {
+		return ""
+	}
+	return key
+}
+
 type piEvent struct {
 	Type         string          `json:"type"`
 	Aborted      bool            `json:"aborted"`
@@ -91,13 +116,10 @@ type piEvent struct {
 		} `json:"content"`
 	} `json:"result"`
 	Message struct {
-		Role       string `json:"role"`
-		StopReason string `json:"stopReason"`
-		Error      string `json:"errorMessage"`
-		Content    []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Role       string         `json:"role"`
+		StopReason string         `json:"stopReason"`
+		Error      string         `json:"errorMessage"`
+		Content    []messageBlock `json:"content"`
 	} `json:"message"`
 }
 
@@ -165,8 +187,8 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	go func() {
 		defer close(done)
 		reader := bufio.NewReader(stdout)
-		var lastAssistantText, prevPair, prevText string
-		var pairCount, textCount int
+		var prevAction string
+		var actionCount int
 		abortLoop := func(what string, count int) {
 			if !loopDetected.Load() {
 				loopDetected.Store(true)
@@ -184,15 +206,6 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 					switch event.Type {
 					case "tool_execution_start":
 						log.Printf("[pi %s] -> tool %s %s", role, event.ToolName, truncate(strings.ReplaceAll(string(event.Args), "\n", " "), 140))
-						pair := lastAssistantText + "\x00" + event.ToolName + " " + string(event.Args)
-						if pair == prevPair {
-							pairCount++
-						} else {
-							prevPair, pairCount = pair, 1
-						}
-						if pairCount >= 8 {
-							abortLoop("turns", pairCount)
-						}
 					case "tool_execution_end":
 						n := 0
 						for _, block := range event.Result.Content {
@@ -212,16 +225,22 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 							}
 							if result.Text != "" {
 								log.Printf("[pi %s] assistant: %s", role, truncate(strings.ReplaceAll(result.Text, "\n", " "), 160))
-								if result.Text == prevText {
-									textCount++
+							}
+							// A loop is a repeated ACTION: the same text plus the same
+							// tool calls. Repeating a preamble sentence across
+							// different reads is normal batching, not a loop; a bare
+							// thinking-only turn carries no key and never counts.
+							action := loopTurnKey(result.Text, event.Message.Content)
+							if action != "" {
+								if action == prevAction {
+									actionCount++
 								} else {
-									prevText, textCount = result.Text, 1
+									prevAction, actionCount = action, 1
 								}
-								if textCount >= 8 {
-									abortLoop("assistant turns", textCount)
+								if actionCount >= 8 {
+									abortLoop("identical assistant turns", actionCount)
 								}
 							}
-							lastAssistantText = result.Text
 						}
 					case "compaction_end":
 						if event.ErrorMessage != "" {

@@ -1,6 +1,9 @@
 package autopilot
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestInvestigateStatusParser(t *testing.T) {
 	cases := []struct {
@@ -27,6 +30,36 @@ func TestInvestigateStatusParser(t *testing.T) {
 				t.Fatalf("investigateStatus = (%q, %t), want (%q, %t)", got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+func TestLoopTurnKey(t *testing.T) {
+	preamble := "The tracked files list shows paths in the repository, not in the artifacts directory. Let me read from the actual repository."
+	read := func(p string) messageBlock {
+		return messageBlock{Type: "toolCall", Name: "read", Arguments: json.RawMessage(`{"path":"` + p + `"}`)}
+	}
+	// Different reads with the same repeated preamble: progress, not a loop.
+	a := loopTurnKey(preamble, []messageBlock{read("a.go")})
+	b := loopTurnKey(preamble, []messageBlock{read("b.go")})
+	if a == b {
+		t.Fatal("different tool arguments must produce different loop keys")
+	}
+	// The true loop: identical text and identical call eight times over.
+	first := loopTurnKey(preamble, []messageBlock{read("a.go")})
+	same := first
+	for i := 0; i < 8; i++ {
+		same = loopTurnKey(preamble, []messageBlock{read("a.go")})
+		if same != first {
+			t.Fatal("repeat of the identical action must produce the same key")
+		}
+	}
+	// A thinking-only turn has no key and must never count toward a loop.
+	if loopTurnKey("", []messageBlock{{Type: "thinking", Text: "hmm"}}) != "" {
+		t.Fatal("text-less, call-less turn must produce an empty key")
+	}
+	// Identical text without any tool call still counts as a loop key.
+	if loopTurnKey("stuck", nil) != "stuck" {
+		t.Fatal("bare repeated text must produce a key")
 	}
 }
 
