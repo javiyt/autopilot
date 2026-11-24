@@ -16,8 +16,9 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|status|doctor|discover-chat|service> -config /path/config.yaml [options]")
+	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|triage|status|doctor|discover-chat|service> -config /path/config.yaml [options]")
 	fmt.Fprintln(os.Stderr, "  run: optional -once to process one issue then exit")
+	fmt.Fprintln(os.Stderr, "  triage: plan the issue queue once and print the order without executing")
 	fmt.Fprintln(os.Stderr, "  status: show durable state without contacting Pi or GitHub")
 	fmt.Fprintln(os.Stderr, "  doctor: check local binaries and registered Pi models")
 	fmt.Fprintln(os.Stderr, "  discover-chat: show Telegram chat IDs after sending /start to your bot")
@@ -113,6 +114,17 @@ func main() {
 	}
 
 	switch action {
+	case "triage":
+		app, err := autopilot.NewApp(cfg, token)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer app.Close()
+		report, err := app.PlanTasks(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(report)
 	case "status":
 		state, err := autopilot.LoadState(filepath.Join(cfg.StateDir, "state.json"), cfg)
 		if err != nil {

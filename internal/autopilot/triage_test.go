@@ -34,6 +34,135 @@ func TestParseIssueDeps(t *testing.T) {
 	}
 }
 
+func TestParseIssueDepsListForms(t *testing.T) {
+	cases := []struct {
+		body string
+		want []depRef
+	}{
+		{"Dependencies: #12, #34", []depRef{{target: 12, dir: "after"}, {target: 34, dir: "after"}}},
+		{"**Dependencies:** HS-006,HS-045(#64)", []depRef{{target: 64, dir: "after"}}},
+		{"**Dependencies:** FEEDS-10, FEEDS-11. **Related:** #8, #22, #28, #131", nil},
+		{"- Blocked by: #8, #9", []depRef{{target: 8, dir: "after"}, {target: 9, dir: "after"}}},
+		{"Blocks: #8, #9", []depRef{{target: 8, dir: "before"}, {target: 9, dir: "before"}}},
+		{"No dependencies: none here.", nil},
+	}
+	for _, c := range cases {
+		got := parseIssueDeps(c.body)
+		if len(got) != len(c.want) {
+			t.Fatalf("%q: got %+v, want %+v", c.body, got, c.want)
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Fatalf("%q: got %+v, want %+v", c.body, got, c.want)
+			}
+		}
+	}
+}
+
+func TestVersionFromText(t *testing.T) {
+	cases := map[string][]int{
+		"v0.1 - End-to-end MVP": {0, 1},
+		"v1 - GA":               {1},
+		"2.0 - Release":         {2, 0},
+		"v0.10 hotfix":          {0, 10},
+		"Backlog":               nil,
+		"":                      nil,
+	}
+	for in, want := range cases {
+		got := versionFromText(in)
+		if (got == nil) != (want == nil) || (want != nil && compareVersions(got, want) != 0) {
+			t.Fatalf("versionFromText(%q) = %v, want %v", in, got, want)
+		}
+	}
+	// Numeric, not lexical: v0.2 sorts before v0.10.
+	if compareVersions([]int{0, 2}, []int{0, 10}) >= 0 {
+		t.Fatalf("v0.2 must sort before v0.10")
+	}
+}
+
+func TestFactFor(t *testing.T) {
+	issue := QueueIssue{
+		Number:    9,
+		Milestone: typedMilestone("v0.2 - Portable Architecture"),
+		Labels:    typedLabels("type:bug", "priority:P1"),
+	}
+	f := factFor(issue)
+	if !f.bug || f.priority != 1 || len(f.version) != 2 || f.version[0] != 0 || f.version[1] != 2 {
+		t.Fatalf("got %+v", f)
+	}
+	plain := factFor(QueueIssue{Number: 10})
+	if plain.bug || plain.priority != 3 || plain.version != nil {
+		t.Fatalf("plain issue must be unflagged: %+v", plain)
+	}
+}
+
+func typedMilestone(title string) struct {
+	Title string `json:"title"`
+} {
+	return struct {
+		Title string `json:"title"`
+	}{Title: title}
+}
+
+func typedLabels(names ...string) []struct {
+	Name string `json:"name"`
+} {
+	labels := make([]struct {
+		Name string `json:"name"`
+	}, len(names))
+	for i, n := range names {
+		labels[i] = struct {
+			Name string `json:"name"`
+		}{Name: n}
+	}
+	return labels
+}
+
+func TestDeterministicQueueMilestonesPriorityBugs(t *testing.T) {
+	d := func(day int) time.Time {
+		return time.Date(2026, 11, day, 12, 0, 0, 0, time.UTC)
+	}
+	issues := []QueueIssue{
+		{Number: 27, Title: "feed quality", CreatedAt: d(1), Milestone: typedMilestone("v0.4 - Story intelligence"), Labels: typedLabels("priority:P1")},
+		{Number: 110, Title: "release gate", CreatedAt: d(10), Milestone: typedMilestone("v0.1 - End-to-end MVP"), Labels: typedLabels("priority:P0")},
+		{Number: 112, Title: "runbook", CreatedAt: d(11), Milestone: typedMilestone("v0.1 - End-to-end MVP"), Labels: typedLabels("priority:P1")},
+		{Number: 130, Title: "ui polish", CreatedAt: d(12)},
+		{Number: 200, Title: "crash on ingest", CreatedAt: d(13), Milestone: typedMilestone("v0.7 - Optional AI"), Labels: typedLabels("bug", "priority:P2")},
+	}
+	queue := DeterministicQueue(issues)
+	want := []int{200, 110, 112, 27, 130}
+	if !reflect.DeepEqual(queue, want) {
+		t.Fatalf("got %v, want %v (bug first, then milestone asc, priority, unversioned last)", queue, want)
+	}
+}
+
+func TestDeterministicQueueWithAssignments(t *testing.T) {
+	issues := []QueueIssue{
+		{Number: 110, Milestone: typedMilestone("v0.1 - End-to-end MVP")},
+		{Number: 27, Milestone: typedMilestone("v0.4 - Story intelligence")},
+		{Number: 130}, // no milestone: unversioned without an assignment,
+		// v0.3 with one
+	}
+	if queue := DeterministicQueue(issues); !reflect.DeepEqual(queue, []int{110, 27, 130}) {
+		t.Fatalf("without assignment got %v", queue)
+	}
+	queue := DeterministicQueueWithAssignments(issues, map[int][]int{130: {0, 3}})
+	if !reflect.DeepEqual(queue, []int{110, 130, 27}) {
+		t.Fatalf("with v0.3 assignment got %v", queue)
+	}
+}
+
+func TestDeterministicQueueDependenciesBeatRank(t *testing.T) {
+	issues := []QueueIssue{
+		{Number: 50, Body: "Depends on #20.", Milestone: typedMilestone("v0.1 - a")},
+		{Number: 20, Body: "", Milestone: typedMilestone("v0.5 - b")},
+	}
+	queue := DeterministicQueue(issues)
+	if !reflect.DeepEqual(queue, []int{20, 50}) {
+		t.Fatalf("a blocker in a higher milestone must come first, got %v", queue)
+	}
+}
+
 func TestDeterministicQueueHonorsDependencies(t *testing.T) {
 	// 12 comes before 8 (blocks) and before 3 (3 depends on 12); ties break by number.
 	queue := DeterministicQueue(sampleIssues())
@@ -53,15 +182,70 @@ func TestDeterministicQueueBreaksCycles(t *testing.T) {
 	}
 }
 
-func TestPlanQueueAcceptsLLMOrder(t *testing.T) {
-	issues := sampleIssues()
-	queue, fromLLM := PlanQueue(issues, `[{"n":3,"why":"cheap fix"},{"n":8,"why":"related"},{"n":12,"why":"prereq"}]`)
-	if !fromLLM || !reflect.DeepEqual(queue, []int{3, 8, 12}) {
-		t.Fatalf("object form: got %v llm=%t", queue, fromLLM)
+func TestPlanQueueAcceptsValidLLMAnswer(t *testing.T) {
+	issues := []QueueIssue{
+		{Number: 5, Milestone: typedMilestone("v0.2 - x"), Labels: typedLabels("priority:P1")},
+		{Number: 6, Milestone: typedMilestone("v0.2 - x"), Labels: typedLabels("priority:P0")},
+		{Number: 7}, // no milestone
+		{Number: 8, Milestone: typedMilestone("v0.1 - y"), Labels: typedLabels("bug")},
 	}
-	queue, fromLLM = PlanQueue(issues, "```json\n[12, 8, 3]\n```")
-	if !fromLLM || !reflect.DeepEqual(queue, []int{12, 8, 3}) {
-		t.Fatalf("bare-number fenced form: got %v llm=%t", queue, fromLLM)
+	// Valid: bug band, then v0.1 (assigned issue 7), then the v0.2 group.
+	plan := PlanQueue(issues, `{"assignments":[{"n":7,"milestone":"v0.1"}],"order":[{"n":8,"why":"bug"},{"n":7,"why":"v0.1"},{"n":6,"why":"P0"},{"n":5,"why":"P1"}]}`)
+	if !plan.FromLLM || !reflect.DeepEqual(plan.Order, []int{8, 7, 6, 5}) {
+		t.Fatalf("got %+v", plan)
+	}
+	if len(plan.Assign) != 1 || compareVersions(plan.Assign[7], []int{0, 1}) != 0 {
+		t.Fatalf("assignments = %+v", plan.Assign)
+	}
+	// Same rules in the legacy bare-array form.
+	plan = PlanQueue(sampleIssues(), "```json\n[12, 8, 3]\n```")
+	if !plan.FromLLM || !reflect.DeepEqual(plan.Order, []int{12, 8, 3}) {
+		t.Fatalf("bare-number fenced form: got %+v", plan)
+	}
+}
+
+func TestPlanQueueRejectsBandCrossing(t *testing.T) {
+	issues := []QueueIssue{
+		{Number: 5, Milestone: typedMilestone("v0.2 - x"), Labels: typedLabels("priority:P1")},
+		{Number: 6, Milestone: typedMilestone("v0.2 - x"), Labels: typedLabels("priority:P0")},
+		{Number: 7},
+		{Number: 8, Milestone: typedMilestone("v0.1 - y"), Labels: typedLabels("bug")},
+	}
+	// P1 before P0 inside the same milestone: a band backwards.
+	plan := PlanQueue(issues, `{"assignments":[{"n":7,"milestone":"none"}],"order":[{"n":8},{"n":5},{"n":6},{"n":7}]}`)
+	if plan.FromLLM {
+		t.Fatalf("band crossing must be rejected: %+v", plan)
+	}
+	if !reflect.DeepEqual(plan.Order, []int{8, 6, 5, 7}) {
+		t.Fatalf("deterministic fallback got %v", plan.Order)
+	}
+}
+
+func TestPlanQueueRejectsDependencyViolation(t *testing.T) {
+	issues := sampleIssues() // 3 depends on 12, 12 blocks 8: one single band
+	plan := PlanQueue(issues, `[3, 8, 12]`)
+	if plan.FromLLM {
+		t.Fatalf("dependency violation must be rejected: %+v", plan)
+	}
+	if !reflect.DeepEqual(plan.Order, []int{12, 3, 8}) {
+		t.Fatalf("deterministic fallback got %v", plan.Order)
+	}
+}
+
+func TestPlanQueueKeepsAssignmentsWhenOrderFails(t *testing.T) {
+	issues := []QueueIssue{
+		{Number: 5, Milestone: typedMilestone("v0.2 - x")},
+		{Number: 7}, // no milestone
+		{Number: 8}, // no milestone
+	}
+	// The LLM assigns milestones but its order is incomplete: the
+	// assignments survive into the deterministic order.
+	plan := PlanQueue(issues, `{"assignments":[{"n":7,"milestone":"v0.1"},{"n":8,"milestone":"v0.3"}],"order":[{"n":5}]}`)
+	if plan.FromLLM {
+		t.Fatalf("incomplete order must not be accepted: %+v", plan)
+	}
+	if !reflect.DeepEqual(plan.Order, []int{7, 5, 8}) {
+		t.Fatalf("deterministic order with assignments got %v", plan.Order)
 	}
 }
 
@@ -74,12 +258,12 @@ func TestPlanQueueRejectsInvalidLLMAnswer(t *testing.T) {
 		`[{"n":12},{"n":8},{"n":999}]`, // unknown issue
 	}
 	for _, text := range cases {
-		queue, fromLLM := PlanQueue(issues, text)
-		if fromLLM {
+		plan := PlanQueue(issues, text)
+		if plan.FromLLM {
 			t.Fatalf("%q must not be accepted", text)
 		}
-		if !reflect.DeepEqual(queue, []int{12, 3, 8}) {
-			t.Fatalf("%q: fallback got %v", text, queue)
+		if !reflect.DeepEqual(plan.Order, []int{12, 3, 8}) {
+			t.Fatalf("%q: fallback got %v", text, plan.Order)
 		}
 	}
 }

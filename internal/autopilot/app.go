@@ -289,7 +289,7 @@ func (a *App) Work(ctx context.Context, once bool) error {
 				}
 				continue
 			}
-			issues, queue, err := a.planTaskQueue(ctx, s)
+			issues, queue, _, err := a.planTaskQueue(ctx, s)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
