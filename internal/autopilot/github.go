@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -107,34 +108,127 @@ func (a *App) prepareIssueBranch(ctx context.Context, issue Issue) error {
 	if _, err := os.Stat(filepath.Join(a.checkout, ".git")); err != nil {
 		return err
 	}
+	a.recoverInterruptedRebase(ctx)
 	current, err := command(ctx, a.checkout, "git", "branch", "--show-current")
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(current) == branch {
-		return nil
+	if strings.TrimSpace(current) != branch {
+		status, err := command(ctx, a.checkout, "git", "status", "--porcelain")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(status) != "" {
+			return errors.New("checkout contains uncommitted changes; refusing to switch branches")
+		}
+		if _, err = command(ctx, a.checkout, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			_, err = command(ctx, a.checkout, "git", "switch", branch)
+			return err
+		}
+		if _, err = command(ctx, a.checkout, "git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
+			_, err = command(ctx, a.checkout, "git", "switch", "-c", branch, "--track", "origin/"+branch)
+			return err
+		}
+		base := a.snapshot().BaseBranch
+		if base == "" {
+			return errors.New("default branch not recorded by repository_setup")
+		}
+		_, err = command(ctx, a.checkout, "git", "switch", "-c", branch, "origin/"+base)
+		if err != nil {
+			return err
+		}
 	}
-	status, err := command(ctx, a.checkout, "git", "status", "--porcelain")
-	if err != nil {
-		return err
+	// The base can move while this issue's earlier rounds ran, and publishing
+	// against a stale base produces a merge-ineligible PR head. Keep the
+	// working tree on the current base so the model implements against what
+	// CI will actually test. Only a clean tree is rebased: an uncommitted
+	// rework round picks the moved base up at the merge stage instead.
+	if base := a.snapshot().BaseBranch; base != "" {
+		dirty, err := command(ctx, a.checkout, "git", "status", "--porcelain")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(dirty) != "" {
+			return nil
+		}
+		if behind, err := a.baseAheadCount(ctx, "HEAD"); err != nil {
+			return err
+		} else if behind > 0 {
+			if _, err := a.rebaseIssueBranch(ctx); err != nil {
+				return err
+			}
+		}
 	}
-	if strings.TrimSpace(status) != "" {
-		return errors.New("checkout contains uncommitted changes; refusing to switch branches")
+	return nil
+}
+
+// recoverInterruptedRebase aborts a rebase left in progress by a crash. The
+// only rebase this checkout ever runs is one this supervisor started, so an
+// in-progress rebase is always stale state to clear, not user work.
+func (a *App) recoverInterruptedRebase(ctx context.Context) {
+	if _, err := command(ctx, a.checkout, "git", "rebase", "--abort"); err == nil {
+		log.Printf("aborted an interrupted rebase before continuing")
 	}
-	if _, err = command(ctx, a.checkout, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
-		_, err = command(ctx, a.checkout, "git", "switch", branch)
-		return err
-	}
-	if _, err = command(ctx, a.checkout, "git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
-		_, err = command(ctx, a.checkout, "git", "switch", "-c", branch, "--track", "origin/"+branch)
-		return err
-	}
+}
+
+// baseAheadCount fetches the remote and reports how many commits of
+// origin/<base> the given ref lacks. A count above zero means the ref is
+// behind the moved base: GitHub holds the merge gate until the PR head
+// contains the new base commits.
+func (a *App) baseAheadCount(ctx context.Context, ref string) (int, error) {
 	base := a.snapshot().BaseBranch
 	if base == "" {
-		return errors.New("default branch not recorded by repository_setup")
+		return 0, errors.New("base branch not recorded by repository_setup")
 	}
-	_, err = command(ctx, a.checkout, "git", "switch", "-c", branch, "origin/"+base)
-	return err
+	if _, err := command(ctx, a.checkout, "git", "fetch", "origin"); err != nil {
+		return 0, err
+	}
+	out, err := command(ctx, a.checkout, "git", "rev-list", "--count", ref+"..origin/"+base)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("unparseable rev-list count %q: %w", out, err)
+	}
+	return n, nil
+}
+
+// rebaseIssueBranch rewrites the dedicated issue branch on top of the moved
+// base. Go owns this mutation: this supervisor created and pushes the branch
+// exclusively. A content conflict aborts the rebase and names the files:
+// nothing deterministic can resolve it, so the stage blocks with evidence.
+func (a *App) rebaseIssueBranch(ctx context.Context) (string, error) {
+	base := a.snapshot().BaseBranch
+	if base == "" {
+		return "", errors.New("base branch not recorded by repository_setup")
+	}
+	dirty, err := command(ctx, a.checkout, "git", "status", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return "", errors.New("refusing to rebase a checkout with uncommitted changes")
+	}
+	before, err := command(ctx, a.checkout, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	before = strings.TrimSpace(before)
+	if _, err = command(ctx, a.checkout, "git", "rebase", "origin/"+base); err != nil {
+		conflicted, _ := command(ctx, a.checkout, "git", "diff", "--name-only", "--diff-filter=U")
+		files := strings.Join(strings.Fields(conflicted), ", ")
+		if files == "" {
+			files = "unknown"
+		}
+		command(ctx, a.checkout, "git", "rebase", "--abort")
+		return "", fmt.Errorf("rebase onto origin/%s failed and was aborted; conflicting files: %s; resolve the base move with /fix or manually", base, files)
+	}
+	after, err := command(ctx, a.checkout, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("rebased %s -> %s onto origin/%s", before, strings.TrimSpace(after), base), nil
 }
 
 func branchFor(number int) string { return "autopilot/issue-" + strconv.Itoa(number) }
@@ -179,7 +273,7 @@ func (a *App) publish(ctx context.Context, s State, issue Issue) (int, error) {
 	if err != nil || strings.TrimSpace(changes) == "0" {
 		return 0, errors.New("no commits found for issue; PR creation refused")
 	}
-	if _, err = command(ctx, a.checkout, "git", "push", "--set-upstream", "origin", branch); err != nil {
+	if err := a.pushIssueBranch(ctx, branch); err != nil {
 		return 0, err
 	}
 	after, err := a.diffFingerprint(ctx)
@@ -205,6 +299,31 @@ func (a *App) publish(ctx context.Context, s State, issue Issue) (int, error) {
 		return 0, err
 	}
 	return a.prForBranch(ctx, branch)
+}
+
+// pushIssueBranch publishes the issue branch. A deterministic base sync
+// rewrites branch commits, so the local head and the remote branch diverge;
+// this supervisor owns the branch exclusively, so a lease-protected force
+// push then updates the remote without ever clobbering an intervening push.
+// Any other push failure stands.
+func (a *App) pushIssueBranch(ctx context.Context, branch string) error {
+	_, err := command(ctx, a.checkout, "git", "push", "--set-upstream", "origin", branch)
+	if err == nil {
+		return nil
+	}
+	remote := "origin/" + branch
+	ancestor := func(from, to string) bool {
+		_, e := command(ctx, a.checkout, "git", "merge-base", "--is-ancestor", from, to)
+		return e == nil
+	}
+	if !ancestor(remote, "HEAD") && !ancestor("HEAD", remote) {
+		if _, forceErr := command(ctx, a.checkout, "git", "push", "--force-with-lease", "origin", branch); forceErr == nil {
+			return nil
+		} else {
+			return forceErr
+		}
+	}
+	return err
 }
 
 func (a *App) prForBranch(ctx context.Context, branch string) (int, error) {

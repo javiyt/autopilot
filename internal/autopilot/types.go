@@ -38,6 +38,7 @@ type Config struct {
 	MaxReviewRounds     int                     `yaml:"max_review_rounds"`
 	MaxCIFixes          int                     `yaml:"max_ci_fixes"`
 	MaxLocalFixes       int                     `yaml:"max_local_fixes"`
+	MaxBaseSyncRounds   int                     `yaml:"max_base_sync_rounds"`
 	CIWaitMinutes       int                     `yaml:"ci_wait_minutes"`
 	AutoMerge           bool                    `yaml:"auto_merge"`
 	CheckCommand        string                  `yaml:"check_command"`
@@ -111,6 +112,9 @@ func ReadConfig(path string) (Config, error) {
 	}
 	if cfg.MaxLocalFixes <= 0 {
 		cfg.MaxLocalFixes = 3
+	}
+	if cfg.MaxBaseSyncRounds <= 0 {
+		cfg.MaxBaseSyncRounds = 3
 	}
 	if cfg.CIWaitMinutes <= 0 {
 		cfg.CIWaitMinutes = 30
@@ -214,6 +218,7 @@ func (c Config) ExpandEnvironmentVariables() Config {
 	cfg.MaxReviewRounds = parseEnvInt(fmt.Sprintf("%d", cfg.MaxReviewRounds), cfg.MaxReviewRounds)
 	cfg.MaxCIFixes = parseEnvInt(fmt.Sprintf("%d", cfg.MaxCIFixes), cfg.MaxCIFixes)
 	cfg.MaxLocalFixes = parseEnvInt(fmt.Sprintf("%d", cfg.MaxLocalFixes), cfg.MaxLocalFixes)
+	cfg.MaxBaseSyncRounds = parseEnvInt(fmt.Sprintf("%d", cfg.MaxBaseSyncRounds), cfg.MaxBaseSyncRounds)
 	cfg.CIWaitMinutes = parseEnvInt(fmt.Sprintf("%d", cfg.CIWaitMinutes), cfg.CIWaitMinutes)
 	cfg.AutoMerge = parseEnvBool(fmt.Sprintf("%t", cfg.AutoMerge), cfg.AutoMerge)
 	cfg.CheckCommand = expandEnv(cfg.CheckCommand)
@@ -428,6 +433,7 @@ type State struct {
 	ReviewRounds         int               `json:"review_rounds"`
 	CIFixes              int               `json:"ci_fixes"`
 	LocalFixes           int               `json:"local_fixes"`
+	BaseSyncRounds       int               `json:"base_sync_rounds"`
 	BaseBranch           string            `json:"base_branch,omitempty"`
 	ReviewedFingerprint  string            `json:"reviewed_fingerprint,omitempty"`
 	PublishedFingerprint string            `json:"published_fingerprint,omitempty"`

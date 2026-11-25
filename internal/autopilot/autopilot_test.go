@@ -14,7 +14,7 @@ func testConfig(dir string) Config {
 		Repo: "owner/repo", StateDir: dir, PollSeconds: 1,
 		IdleTimeoutMinutes: 1, StageTimeoutMinutes: 1, MaxStageRetries: 3,
 		MaxReviewRounds: 3, MaxCIFixes: 2,
-		MaxLocalFixes: 3, CIWaitMinutes: 30, CheckCommands: []string{"make check"},
+		MaxLocalFixes: 3, MaxBaseSyncRounds: 3, CIWaitMinutes: 30, CheckCommands: []string{"make check"},
 		Models: map[string]ModelProfile{
 			"investigate": {Provider: "omlx", ID: "reviewer", Thinking: "low"},
 			"plan":        {Provider: "omlx", ID: "planner", Thinking: "medium"},
@@ -272,6 +272,133 @@ func TestMergeAuthorityMustBeExplicitAndImmutable(t *testing.T) {
 	a.state.MergePolicy = "manual"
 	if err := a.merge(context.Background(), 123); err == nil {
 		t.Fatal("manual issue must not merge even with current YAML auto_merge=true")
+	}
+}
+
+func TestBaseSyncDetectsBehindHeadRebasesAndAbortsConflicts(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	git := func(d string, args ...string) {
+		t.Helper()
+		if out, err := command(ctx, d, "git", args...); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	commit := func(d, message, file, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(d, file), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		git(d, "add", "--all")
+		git(d, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", message)
+	}
+	// fixture builds a bare origin plus a work clone where main moves ahead of
+	// the published feature head. conflictMain=true makes main rewrite the same
+	// content the feature branch changed, so the rebase conflicts.
+	fixture := func(root string, conflictMain bool) (work string, featureBefore string) {
+		t.Helper()
+		git(root, "init", "--quiet", "--bare", filepath.Join(root, "origin.git"))
+		work = filepath.Join(root, "work")
+		if err := os.MkdirAll(work, 0700); err != nil {
+			t.Fatal(err)
+		}
+		git(work, "init", "--quiet", "-b", "main")
+		git(work, "remote", "add", "origin", filepath.Join(root, "origin.git"))
+		commit(work, "initial", "file.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+		git(work, "push", "origin", "main")
+		git(work, "switch", "-c", branchFor(160))
+		commit(work, "feature change", "file.txt", "one\nfeature two\nthree\nfour\nfive\nsix\n")
+		git(work, "push", "origin", branchFor(160))
+		out, err := command(ctx, work, "git", "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		featureBefore = strings.TrimSpace(out)
+		git(work, "switch", "main")
+		if conflictMain {
+			commit(work, "main move", "file.txt", "one\nmain two\nthree\nfour\nfive\nsix\n")
+		} else {
+			commit(work, "main move", "file.txt", "one\ntwo\nthree\nfour\nfive\nsix\nmain seven\n")
+		}
+		git(work, "push", "origin", "main")
+		return work, featureBefore
+	}
+
+	// Conflict path: main rewrote the line the feature branch changed. The
+	// deterministic rebase must abort and name the file.
+	conflictRoot := filepath.Join(dir, "conflict")
+	if err := os.MkdirAll(conflictRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	work, featureBefore := fixture(conflictRoot, true)
+	cfg := testConfig(t.TempDir())
+	a := &App{cfg: cfg, checkout: work, statePath: filepath.Join(cfg.StateDir, "state.json"), state: DefaultState(cfg)}
+	a.state.BaseBranch = "main"
+
+	if behind, err := a.baseAheadCount(ctx, featureBefore); err != nil || behind != 1 {
+		t.Fatalf("expected PR head 1 commit behind moved base, got %d err=%v", behind, err)
+	}
+	if behind, err := a.baseAheadCount(ctx, "HEAD"); err != nil || behind != 0 {
+		t.Fatalf("main HEAD must not be behind main, got %d err=%v", behind, err)
+	}
+	git(work, "switch", branchFor(160))
+	if _, err := a.rebaseIssueBranch(ctx); err == nil {
+		t.Fatal("rebase with a content conflict must fail")
+	} else if !strings.Contains(err.Error(), "conflicting files: file.txt") {
+		t.Fatalf("conflict evidence missing file name: %v", err)
+	}
+	status, _ := command(ctx, work, "git", "status", "--porcelain")
+	headAfterConflict, _ := command(ctx, work, "git", "rev-parse", "HEAD")
+	if strings.TrimSpace(status) != "" || strings.TrimSpace(headAfterConflict) != featureBefore {
+		t.Fatalf("aborted rebase must restore the pre-rebase branch: status=%q head=%s", status, headAfterConflict)
+	}
+
+	// Clean path: main moved a different region. The rebase succeeds, the
+	// lease-protected force push updates the rewritten remote branch, and
+	// prepareIssueBranch rebases a clean behind branch automatically.
+	cleanRoot := filepath.Join(dir, "clean")
+	if err := os.MkdirAll(cleanRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cleanWork, _ := fixture(cleanRoot, false)
+	a.checkout = cleanWork
+	a.state.BaseBranch = "main"
+	if _, err := command(ctx, cleanWork, "git", "switch", branchFor(160)); err != nil {
+		t.Fatal(err)
+	}
+	note, err := a.rebaseIssueBranch(ctx)
+	if err != nil {
+		t.Fatalf("clean rebase failed: %v", err)
+	}
+	if !strings.Contains(note, "rebased") {
+		t.Fatalf("rebase note missing: %q", note)
+	}
+	if behind, err := a.baseAheadCount(ctx, "HEAD"); err != nil || behind != 0 {
+		t.Fatalf("rebased HEAD must contain the moved base, got %d err=%v", behind, err)
+	}
+	if err := a.pushIssueBranch(ctx, branchFor(160)); err != nil {
+		t.Fatalf("force-with-lease push of the rebased branch failed: %v", err)
+	}
+	remoteHead, err := command(ctx, cleanWork, "git", "rev-parse", "origin/"+branchFor(160))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localHead, err := command(ctx, cleanWork, "git", "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(remoteHead) != strings.TrimSpace(localHead) {
+		t.Fatalf("remote feature not updated by force push: %s vs %s", remoteHead, localHead)
+	}
+	git(cleanWork, "switch", "main")
+	commit(cleanWork, "main moves again", "other.txt", "other\n")
+	git(cleanWork, "push", "origin", "main")
+	git(cleanWork, "switch", branchFor(160))
+	if err := a.prepareIssueBranch(ctx, Issue{Number: 160}); err != nil {
+		t.Fatalf("prepareIssueBranch must rebase a clean behind branch: %v", err)
+	}
+	if behind, err := a.baseAheadCount(ctx, "HEAD"); err != nil || behind != 0 {
+		t.Fatalf("prepareIssueBranch left the branch behind: %d err=%v", behind, err)
 	}
 }
 

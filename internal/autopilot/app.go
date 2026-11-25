@@ -382,7 +382,7 @@ func (a *App) beginIssue(issue Issue, queue []int) error {
 		s.Attempts = map[string]int{}
 		s.StageRuns = map[string]int{}
 		s.CIReruns = map[string]int{}
-		s.ReviewRounds, s.CIFixes, s.LocalFixes, s.PRNumber = 0, 0, 0, 0
+		s.ReviewRounds, s.CIFixes, s.LocalFixes, s.BaseSyncRounds, s.PRNumber = 0, 0, 0, 0, 0
 		s.BaseBranch, s.ReviewedFingerprint, s.PublishedFingerprint, s.PublishedSHA = "", "", "", ""
 		s.CIStartedAt = time.Time{}
 		s.CIRerunAt = time.Time{}

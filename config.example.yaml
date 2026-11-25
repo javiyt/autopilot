@@ -46,6 +46,10 @@ max_ci_fixes: 2
 # Maximum local fix attempts before blocking
 max_local_fixes: 3
 
+# Maximum base-sync rounds (deterministic rebase of the PR branch onto the
+# moved base after publication) before blocking for manual resolution
+max_base_sync_rounds: 3
+
 # Wait time for CI completion (minutes)
 ci_wait_minutes: 30
 

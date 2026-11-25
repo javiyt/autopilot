@@ -554,6 +554,39 @@ func (a *App) step(ctx context.Context, s State) error {
 		if err != nil {
 			return err
 		}
+		// The base can move after publication: GitHub then holds the merge gate
+		// (mergeStateStatus != CLEAN) until the PR head contains the new base
+		// commits. That is the one merge gate state this supervisor can clear
+		// deterministically: rebase the dedicated branch, then re-run the full
+		// verification loop (local checks -> independent review -> publication
+		// -> CI) so the published head is again the reviewed head. Any other
+		// non-CLEAN state stays fatal below.
+		if behind, behindErr := a.baseAheadCount(ctx, p.HeadRefOid); behindErr != nil {
+			return behindErr
+		} else if behind > 0 {
+			if s.BaseSyncRounds >= a.cfg.MaxBaseSyncRounds {
+				return fmt.Errorf("base branch moved %d commit(s) beyond PR head %s after %d sync rounds; resolve the base move manually or with /fix", behind, p.HeadRefOid, s.BaseSyncRounds)
+			}
+			syncNote := "local branch already contains the moved base (crash after a previous sync); re-publishing it"
+			if localBehind, localErr := a.baseAheadCount(ctx, "HEAD"); localErr != nil {
+				return localErr
+			} else if localBehind > 0 {
+				if note, rebaseErr := a.rebaseIssueBranch(ctx); rebaseErr != nil {
+					return rebaseErr
+				} else {
+					syncNote = note
+				}
+			}
+			if err := a.update(func(st *State) { st.BaseSyncRounds++; st.ReviewedFingerprint = "" }); err != nil {
+				return err
+			}
+			report := fmt.Sprintf("# Merge: base sync (deterministic)\n\nPR #%d head %s is behind origin/%s by %d commit(s).\n%s\nRound %d/%d. Re-running local checks, independent review, publication and CI on the updated head before any merge attempt.\n", s.PRNumber, p.HeadRefOid, s.BaseBranch, behind, syncNote, s.BaseSyncRounds+1, a.cfg.MaxBaseSyncRounds)
+			if err := a.recordHandoff(ctx, s, "merge", "local_verify", report); err != nil {
+				return err
+			}
+			a.notify(fmt.Sprintf("Issue #%d: base branch moved after publication; updated the PR branch and re-running verification (base sync %d/%d).", issue.Number, s.BaseSyncRounds+1, a.cfg.MaxBaseSyncRounds))
+			return a.transition("local_verify")
+		}
 		if p.ReviewDecision == "CHANGES_REQUESTED" || p.MergeStateStatus != "CLEAN" {
 			return fmt.Errorf("GitHub review/protection/merge gate not clear: review=%s merge=%s", p.ReviewDecision, p.MergeStateStatus)
 		}
