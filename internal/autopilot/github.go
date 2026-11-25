@@ -215,7 +215,7 @@ func (a *App) rebaseIssueBranch(ctx context.Context) (string, error) {
 		return "", err
 	}
 	before = strings.TrimSpace(before)
-	if _, err = command(ctx, a.checkout, "git", "rebase", "origin/"+base); err != nil {
+	if _, err = command(ctx, a.checkout, "git", append(gitServiceIdentity, "rebase", "origin/"+base)...); err != nil {
 		conflicted, _ := command(ctx, a.checkout, "git", "diff", "--name-only", "--diff-filter=U")
 		files := strings.Join(strings.Fields(conflicted), ", ")
 		if files == "" {
@@ -232,6 +232,12 @@ func (a *App) rebaseIssueBranch(ctx context.Context) (string, error) {
 }
 
 func branchFor(number int) string { return "autopilot/issue-" + strconv.Itoa(number) }
+
+// gitServiceIdentity gives Go-owned commits a deterministic committer
+// identity. Hosted runners and service containers ship no global git
+// identity, and rebases and work-in-progress commits must not depend on
+// whatever the host happens to configure: they must read as autopilot work.
+var gitServiceIdentity = []string{"-c", "user.name=pi-autopilot", "-c", "user.email=pi-autopilot@localhost"}
 
 func (a *App) publish(ctx context.Context, s State, issue Issue) (int, error) {
 	branch := branchFor(issue.Number)
@@ -260,7 +266,7 @@ func (a *App) publish(ctx context.Context, s State, issue Issue) (int, error) {
 		if _, err = command(ctx, a.checkout, "git", "add", "--all"); err != nil {
 			return 0, err
 		}
-		if _, err = command(ctx, a.checkout, "git", "commit", "-m", fmt.Sprintf("Implement #%d: %s", issue.Number, truncate(issue.Title, 60))); err != nil {
+		if _, err = command(ctx, a.checkout, "git", append(gitServiceIdentity, "commit", "-m", fmt.Sprintf("Implement #%d: %s", issue.Number, truncate(issue.Title, 60)))...); err != nil {
 			return 0, err
 		}
 	}
