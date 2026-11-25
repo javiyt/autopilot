@@ -451,3 +451,40 @@ func TestEnterNoWorkNotifiesOnceState(t *testing.T) {
 		t.Fatalf("after beginIssue: phase %q notified %t queue %v", s.Phase, s.NoWorkNotified, s.Queue)
 	}
 }
+
+func TestOpenQueueFromBaseline(t *testing.T) {
+	seen := []int{3, 8, 12}
+	order := []int{12, 3, 8}
+
+	// Unchanged open set: the planned order is reused, nothing is new.
+	queue, hasNew := openQueueFromBaseline(seen, order, []int{12, 3, 8})
+	if hasNew || !reflect.DeepEqual(queue, []int{12, 3, 8}) {
+		t.Fatalf("unchanged set: queue %v hasNew %t", queue, hasNew)
+	}
+
+	// Shrunken set (issue 3 closed): survivors keep their relative order,
+	// and the closure is not treated as new work.
+	queue, hasNew = openQueueFromBaseline(seen, order, []int{12, 8})
+	if hasNew || !reflect.DeepEqual(queue, []int{12, 8}) {
+		t.Fatalf("shrunken set: queue %v hasNew %t", queue, hasNew)
+	}
+
+	// Grown set: a number never triaged forces the full triage again.
+	queue, hasNew = openQueueFromBaseline(seen, order, []int{12, 3, 8, 45})
+	if !hasNew || queue != nil {
+		t.Fatalf("grown set: queue %v hasNew %t", queue, hasNew)
+	}
+
+	// No baseline at all (first run): every open issue is new.
+	queue, hasNew = openQueueFromBaseline(nil, nil, []int{7})
+	if !hasNew || queue != nil {
+		t.Fatalf("no baseline: queue %v hasNew %t", queue, hasNew)
+	}
+
+	// Baseline covers the seen set but every triaged issue closed meanwhile:
+	// the filtered queue is empty, so the caller must re-plan.
+	queue, hasNew = openQueueFromBaseline([]int{1}, []int{1}, nil)
+	if hasNew || len(queue) != 0 {
+		t.Fatalf("all closed: queue %v hasNew %t", queue, hasNew)
+	}
+}

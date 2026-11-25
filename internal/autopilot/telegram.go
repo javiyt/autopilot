@@ -290,8 +290,11 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 		}
 		if err := a.update(func(s *State) {
 			roleModels, offset := s.RoleModels, s.TelegramOffset
+			// Like complete(), the triage baseline outlives the skipped issue.
+			triagedRepo, triagedSeen, triagedOrder := s.TriagedRepo, s.TriagedSeen, s.TriagedOrder
 			*s = DefaultState(a.cfg)
 			s.RoleModels, s.TelegramOffset = roleModels, offset
+			s.TriagedRepo, s.TriagedSeen, s.TriagedOrder = triagedRepo, triagedSeen, triagedOrder
 		}); err != nil {
 			reply(err.Error())
 			return

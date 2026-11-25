@@ -767,6 +767,12 @@ func (a *App) planTaskQueue(ctx context.Context, s State) ([]QueueIssue, []int, 
 	if err != nil {
 		return nil, nil, "", err
 	}
+	return a.planTaskQueueWithIssues(ctx, s, issues)
+}
+
+// planTaskQueueWithIssues plans an already-collected open issue set. See
+// planTaskQueue for the division of labour between Go and the LLM.
+func (a *App) planTaskQueueWithIssues(ctx context.Context, s State, issues []QueueIssue) ([]QueueIssue, []int, string, error) {
 	llmText := ""
 	if len(issues) > 0 && len(issues) <= triageLLMCap {
 		text, llmErr := a.runStageIn(ctx, s, "triage", TriagePrompt(issues), true, a.cfg.StateDir)
@@ -790,6 +796,69 @@ func (a *App) planTaskQueue(ctx context.Context, s State) ([]QueueIssue, []int, 
 	_ = a.storeQueueArtifact("order-"+stamp+".json", string(data))
 	_ = a.storeQueueArtifact("order-"+stamp+".md", report)
 	return issues, plan.Order, report, nil
+}
+
+// openQueueFromBaseline decides whether a saved triage baseline still covers
+// the collected open set. It reports hasNew when any open issue number was
+// never triaged (freshly published work: the LLM ordering must re-run), and
+// otherwise returns the planned order filtered to the issues that are still
+// open. A shrunken set never invalidates the order of the survivors.
+func openQueueFromBaseline(seen, order, open []int) (queue []int, hasNew bool) {
+	known := make(map[int]bool, len(seen))
+	for _, n := range seen {
+		known[n] = true
+	}
+	for _, n := range open {
+		if !known[n] {
+			return nil, true
+		}
+	}
+	stillOpen := make(map[int]bool, len(open))
+	for _, n := range open {
+		stillOpen[n] = true
+	}
+	queue = make([]int, 0, len(open))
+	for _, n := range order {
+		if stillOpen[n] {
+			queue = append(queue, n)
+		}
+	}
+	return queue, false
+}
+
+// nextTaskQueue is the gate the work loop uses before selecting a new task.
+// The deterministic gh collection always runs so closed issues drop out of
+// the queue, but the LLM ordering only re-runs when the open set grew,
+// when no baseline exists yet, or when the baseline belongs to another
+// repository. Otherwise the planned order is reused untouched.
+func (a *App) nextTaskQueue(ctx context.Context, s State) ([]QueueIssue, []int, error) {
+	issues, err := a.collectQueue(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(s.TriagedSeen) > 0 && s.TriagedRepo == a.cfg.Repo {
+		var open []int
+		for _, issue := range issues {
+			open = append(open, issue.Number)
+		}
+		if queue, hasNew := openQueueFromBaseline(s.TriagedSeen, s.TriagedOrder, open); !hasNew && len(queue) > 0 {
+			log.Printf("triage: open issue set unchanged since the last triage; reusing the planned order without an LLM call")
+			return issues, queue, nil
+		}
+	}
+	issues, queue, _, err := a.planTaskQueueWithIssues(ctx, s, issues)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := make([]int, 0, len(issues))
+	for _, issue := range issues {
+		seen = append(seen, issue.Number)
+	}
+	sort.Ints(seen)
+	if err := a.update(func(st *State) { st.TriagedRepo, st.TriagedSeen, st.TriagedOrder = a.cfg.Repo, seen, queue }); err != nil {
+		return nil, nil, err
+	}
+	return issues, queue, nil
 }
 
 // PlanTasks runs the triage planning once and returns the readable report.

@@ -662,8 +662,12 @@ func (a *App) complete(issue Issue) error {
 	a.notify(fmt.Sprintf("✅ Issue #%d %s. Disk cleaned up%s Moving to the next eligible issue.", issue.Number, result, note))
 	return a.update(func(s *State) {
 		previousModels, offset, paused := s.RoleModels, s.TelegramOffset, s.Paused
+		// The triage baseline outlives the issue it fed: the next selection
+		// re-runs the LLM ordering only if new work was published meanwhile.
+		triagedRepo, triagedSeen, triagedOrder := s.TriagedRepo, s.TriagedSeen, s.TriagedOrder
 		*s = DefaultState(a.cfg)
 		s.RoleModels, s.TelegramOffset, s.Paused = previousModels, offset, paused
+		s.TriagedRepo, s.TriagedSeen, s.TriagedOrder = triagedRepo, triagedSeen, triagedOrder
 	})
 }
 

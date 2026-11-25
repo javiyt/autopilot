@@ -434,6 +434,15 @@ type State struct {
 	CIFixes              int               `json:"ci_fixes"`
 	LocalFixes           int               `json:"local_fixes"`
 	BaseSyncRounds       int               `json:"base_sync_rounds"`
+	// TriagedRepo names the repository the triage baseline was planned for;
+	// a baseline from another repository is stale, because issue numbers are
+	// per repository.
+	TriagedRepo string `json:"triaged_repo,omitempty"`
+	// TriagedSeen holds the open issue numbers the last full triage planned,
+	// and TriagedOrder the order that covered them. The work loop re-runs the
+	// LLM ordering only when the open set grows or the baseline is missing.
+	TriagedSeen  []int `json:"triaged_seen,omitempty"`
+	TriagedOrder []int `json:"triaged_order,omitempty"`
 	BaseBranch           string            `json:"base_branch,omitempty"`
 	ReviewedFingerprint  string            `json:"reviewed_fingerprint,omitempty"`
 	PublishedFingerprint string            `json:"published_fingerprint,omitempty"`

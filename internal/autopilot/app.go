@@ -166,6 +166,9 @@ func (a *App) startManualIssue(ctx context.Context, repo, milestone string) erro
 		st.Queue = nil
 		st.NoWorkNotified = false
 		st.LastError = ""
+		// The triage baseline belongs to the previous target: issue numbers
+		// are per repository, so it must be re-planned for the new one.
+		st.TriagedRepo, st.TriagedSeen, st.TriagedOrder = "", nil, nil
 	})
 	if err != nil {
 		return err
@@ -289,7 +292,7 @@ func (a *App) Work(ctx context.Context, once bool) error {
 				}
 				continue
 			}
-			issues, queue, _, err := a.planTaskQueue(ctx, s)
+			issues, queue, err := a.nextTaskQueue(ctx, s)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
