@@ -1,0 +1,48 @@
+# Dependabot version updates.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuring-dependency-updates
+version: 2
+updates:
+  # Go modules (go.mod / go.sum)
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "go"
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 5
+
+  # GitHub Actions (workflows under .github/workflows)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 5
+
+# No `docker` entries: the repository currently has no Dockerfiles.
+# If a Dockerfile is added, add a matching entry:
+#
+#   - package-ecosystem: "docker"
+#     directory: "<path containing the Dockerfile>"
+#     schedule:
+#       interval: "weekly"
+#     labels:
+#       - "dependencies"
+#       - "docker"

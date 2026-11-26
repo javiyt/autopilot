@@ -20,23 +20,41 @@ import (
 )
 
 func command(ctx context.Context, dir, name string, args ...string) (string, error) {
+	out, _, err := commandCapped(ctx, dir, name, 2<<20, args...)
+	return out, err
+}
+
+// commandCapped runs a command and captures stdout up to limit bytes. The
+// returned truncated flag lets callers distinguish complete output from a
+// capped capture instead of silently reviewing partial data.
+func commandCapped(ctx context.Context, dir, name string, limit int, args ...string) (string, bool, error) {
 	c := exec.CommandContext(ctx, name, args...)
 	if dir != "" {
 		c.Dir = dir
 	}
-	stdout, stderr := &limitedBuffer{limit: 2 << 20}, &limitedBuffer{limit: 2 << 20}
+	stdout, stderr := &limitedBuffer{limit: limit}, &limitedBuffer{limit: 2 << 20}
 	c.Stdout = stdout
 	c.Stderr = stderr
-	if err := c.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, truncate(stderr.String(), 1200))
+	runErr := c.Run()
+	if runErr != nil {
+		return stdout.String(), stdout.hit, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), runErr, truncate(stderr.String(), 1200))
 	}
-	return stdout.String(), nil
+	return stdout.String(), stdout.hit, nil
+}
+
+// commandFull captures the complete stdout of a command (bounded at 64 MiB)
+// for callers whose output legitimately exceeds the 2 MiB cap of command,
+// such as a git diff over a multi-megabyte generated file. A hit limit is
+// reported as truncation so the caller fails loudly.
+func commandFull(ctx context.Context, dir, name string, args ...string) (string, bool, error) {
+	return commandCapped(ctx, dir, name, 64<<20, args...)
 }
 
 // Prevent a noisy test command from exhausting the controller's own memory.
 type limitedBuffer struct {
 	data  bytes.Buffer
 	limit int
+	hit   bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
@@ -47,6 +65,8 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 			keep = len(p)
 		}
 		_, _ = b.data.Write(p[:keep])
+	} else {
+		b.hit = true
 	}
 	return n, nil
 }
