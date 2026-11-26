@@ -46,7 +46,7 @@ After CI correction, **local_verify, review, publish, and ci** repeat. Attempts 
 ### Requirements
 
 - **System**: Linux (Ubuntu 22.04+, Debian 12+, CentOS 8+, Rocky Linux 9+)
-- **Go**: 1.23+ (`go version`)
+- **Go**: go1.27.4+ (`go version`)
 - **GIT**: `git` in PATH
 - **gh**: GitHub CLI authenticated (`gh auth status`)
 - **pi**: <https://pi.dev> installed locally
@@ -115,7 +115,7 @@ models:
 ### Requirements
 
 - **System**: macOS (Apple Silicon or Intel)
-- **Go**: 1.23+
+- **Go**: go1.27.4+
 - **GIT**: `git` in PATH
 - **gh**: GitHub CLI authenticated
 - **pi**: <https://pi.dev> installed locally
@@ -207,7 +207,7 @@ models:
 ### Requirements
 
 - **System**: Windows 10/11
-- **Go**: 1.23+
+- **Go**: go1.27.4+
 - **GIT**: Git for Windows or WSL2
 - **gh**: GitHub CLI
 - **pi**: <https://pi.dev> (recommended via WSL2 for better performance)
