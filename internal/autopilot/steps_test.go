@@ -2,6 +2,8 @@ package autopilot
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +82,51 @@ func TestVerifyCommandParser(t *testing.T) {
 	}
 }
 
+func TestElideLargeFileDiffs(t *testing.T) {
+	// No file markers at all: byte-for-byte passthrough.
+	noFiles := "hunks without diff --git headers"
+	if got := elideLargeFileDiffs(noFiles); got != noFiles {
+		t.Fatalf("passthrough changed content: %q", got)
+	}
+
+	// One small file under the cap: unchanged content.
+	small := "diff --git a/a.go b/a.go\nindex 1..2 100644\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"
+	if got := elideLargeFileDiffs(small); got != small {
+		t.Fatalf("small file was modified:\n%q\nwant:\n%q", got, small)
+	}
+
+	// One large file (1500 lines) plus one small file after it:
+	// the large one is elided with exact counts, the small one survives intact,
+	// and file boundaries stay intact.
+	large := make([]string, 0, 1500)
+	large = append(large, "diff --git a/big.json b/big.json", "index 1..0 100644", "--- a/big.json", "+++ /dev/null")
+	for i := 0; i < 1496; i++ {
+		large = append(large, fmt.Sprintf("-line %d", i))
+	}
+	diff := strings.Join(large, "\n") + "\n" + small
+	got := elideLargeFileDiffs(diff)
+	gotLines := strings.Split(got, "\n")
+	// The large file yields 400 head + 1 marker + 40 tail = 441 lines, the
+	// small file 7 lines, and the trailing newline of the join one empty
+	// element: 449 total.
+	if len(gotLines) != 449 {
+		t.Fatalf("elided diff has %d lines, want 449", len(gotLines))
+	}
+	if marker := gotLines[400]; marker != "... (1060 diff lines elided for this file; total 1500 lines) ..." {
+		t.Fatalf("elision marker = %q", marker)
+	}
+	if gotLines[4] != "-line 0" {
+		t.Fatalf("first kept line = %q", gotLines[4])
+	}
+	tailStart := 400 + 1
+	if gotLines[tailStart] != "-line 1456" {
+		t.Fatalf("first tail line = %q, want -line 1456", gotLines[tailStart])
+	}
+	if !strings.Contains(got, "diff --git a/a.go b/a.go\nindex 1..2 100644\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new") {
+		t.Fatalf("small file after elided block was damaged:\n%s", got)
+	}
+}
+
 func TestReviewDecisionParser(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -90,6 +137,11 @@ func TestReviewDecisionParser(t *testing.T) {
 		{"preamble and final verdict", "analysis...\n\nfiles checked\n\nDECISION: REQUEST_CHANGES", "DECISION: REQUEST_CHANGES"},
 		{"bold and heading", "text\n**DECISION: APPROVE**", "DECISION: APPROVE"},
 		{"last wins over mid mention", "A DECISION: REQUEST_CHANGES would be needed if X.\n\nfinal check done\nDECISION: APPROVE", "DECISION: APPROVE"},
+		{"heading and mixed case", "analysis done\n\n## Decision: APPROVE", "DECISION: APPROVE"},
+		{"trailing period", "all good\nDECISION: REQUEST_CHANGES.", "DECISION: REQUEST_CHANGES"},
+		{"lowercase marker", "verdict\ndecision: blocked", "DECISION: BLOCKED"},
+		{"backticked marker", "done\n`DECISION: APPROVE`", "DECISION: APPROVE"},
+		{"prose mentioning a marker does not match", "If the diff had a flaw I would write DECISION: REQUEST_CHANGES here.\n\nThe implementation is complete and production-ready.", ""},
 		{"none", "Since I cannot execute commands, let me compile my review.\n## Summary\n...", ""},
 	}
 	for _, tc := range cases {
