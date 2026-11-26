@@ -455,6 +455,29 @@ The merge policy for an issue remains **immutable once started**. Changing confi
 - Never do `git reset --hard`, `git clean -fd`, force-push, remote branch deletion, or bypass protections
 - Local deletions are limited to supervisor **already-merged** branches confirmed with `git branch -d`
 
+## Dependency updates (Dependabot)
+
+`.github/dependabot.yml` keeps Go modules (`gomod`) and GitHub Actions (`github-actions`) up to date on a **weekly** schedule. The repository has no Dockerfiles, so no `docker` entry exists; add one with a matching `directory` when a Dockerfile appears.
+
+Rules applied to automated dependency PRs:
+
+- **Grouping:** `minor` and `patch` updates are grouped into a single PR per ecosystem (`go-modules`, `actions`). Security and major updates are never grouped and open their own PR.
+- **Labels:** `dependencies` plus the ecosystem label (`go`, `github-actions`).
+- **Limits:** at most 5 open dependency PRs per ecosystem at any time.
+- **Quality gates:** dependency PRs trigger the normal `Go` CI workflow (`go mod tidy`, `go test -race ./...`, `go vet ./...`) on `pull_request` and are merged through the same review and branch protection as any other PR. They never bypass checks.
+
+Security update policy:
+
+- Dependabot security advisories open their own PR and are reviewed promptly, ideally within a few days of creation.
+- A failing build or test on a security PR is fixed in the PR (pin workaround or bump a companion dependency); the security fix is not merged red.
+
+Major version upgrades:
+
+- Major bumps arrive as separate PRs (they are excluded from grouping). Review the upstream changelog or release notes for breaking changes before merging.
+- For Go module majors, verify API usage changes in `cmd/` and `internal/`, run `go test -race ./...` and `go vet ./...` locally, and check whether `go.mod` `go`/toolchain directives change — the pinned `go-version` in `.github/workflows/test.yml` must match.
+- For GitHub Actions majors, read the action's release notes and confirm the workflow steps still pass CI on the PR.
+- Merge major upgrades through the same review as any other PR; never merge on CI alone.
+
 ## Persistence and resumption
 
 `state_dir/state.json` preserves issue, phase, triage queue, retries, Telegram temporary models, merge policy, reviewed fingerprint, published head, and CI counter.
