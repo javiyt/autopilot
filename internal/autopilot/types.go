@@ -417,23 +417,23 @@ type State struct {
 	Phase string `json:"phase"`
 	// Repo and Milestone persist the target of a /begin so a supervisor
 	// restarted with an empty configured repo resumes the same repository.
-	Repo                 string            `json:"repo,omitempty"`
-	Milestone            string            `json:"milestone,omitempty"`
-	Queue                []int             `json:"queue,omitempty"`
-	NoWorkNotified       bool              `json:"no_work_notified,omitempty"`
-	BlockedPhase         string            `json:"blocked_phase,omitempty"`
-	Attempts             map[string]int    `json:"attempts"`
-	RoleModels           map[string]string `json:"role_models"`
-	OverridesV2          bool              `json:"model_overrides_v2"`
-	RecoveryPrompt       string            `json:"recovery_prompt,omitempty"`
-	LastError            string            `json:"last_error,omitempty"`
-	PRNumber             int               `json:"pr_number,omitempty"`
-	MergeRequested       bool              `json:"merge_requested"`
-	MergePolicy          string            `json:"merge_policy,omitempty"`
-	ReviewRounds         int               `json:"review_rounds"`
-	CIFixes              int               `json:"ci_fixes"`
-	LocalFixes           int               `json:"local_fixes"`
-	BaseSyncRounds       int               `json:"base_sync_rounds"`
+	Repo           string            `json:"repo,omitempty"`
+	Milestone      string            `json:"milestone,omitempty"`
+	Queue          []int             `json:"queue,omitempty"`
+	NoWorkNotified bool              `json:"no_work_notified,omitempty"`
+	BlockedPhase   string            `json:"blocked_phase,omitempty"`
+	Attempts       map[string]int    `json:"attempts"`
+	RoleModels     map[string]string `json:"role_models"`
+	OverridesV2    bool              `json:"model_overrides_v2"`
+	RecoveryPrompt string            `json:"recovery_prompt,omitempty"`
+	LastError      string            `json:"last_error,omitempty"`
+	PRNumber       int               `json:"pr_number,omitempty"`
+	MergeRequested bool              `json:"merge_requested"`
+	MergePolicy    string            `json:"merge_policy,omitempty"`
+	ReviewRounds   int               `json:"review_rounds"`
+	CIFixes        int               `json:"ci_fixes"`
+	LocalFixes     int               `json:"local_fixes"`
+	BaseSyncRounds int               `json:"base_sync_rounds"`
 	// TriagedRepo names the repository the triage baseline was planned for;
 	// a baseline from another repository is stale, because issue numbers are
 	// per repository.
@@ -441,21 +441,21 @@ type State struct {
 	// TriagedSeen holds the open issue numbers the last full triage planned,
 	// and TriagedOrder the order that covered them. The work loop re-runs the
 	// LLM ordering only when the open set grows or the baseline is missing.
-	TriagedSeen  []int `json:"triaged_seen,omitempty"`
-	TriagedOrder []int `json:"triaged_order,omitempty"`
-	BaseBranch           string            `json:"base_branch,omitempty"`
-	ReviewedFingerprint  string            `json:"reviewed_fingerprint,omitempty"`
-	PublishedFingerprint string            `json:"published_fingerprint,omitempty"`
-	PublishedSHA         string            `json:"published_sha,omitempty"`
-	CIStartedAt          time.Time         `json:"ci_started_at,omitempty"`
-	StageRuns            map[string]int    `json:"stage_runs,omitempty"`
-	CIReruns             map[string]int    `json:"ci_reruns,omitempty"`
-	CIRerunAt            time.Time         `json:"ci_rerun_at,omitempty"`
-	Paused               bool              `json:"paused"`
-	ChatMode             bool              `json:"chat_mode"`
-	ChatHistory          []string          `json:"chat_history,omitempty"`
-	TelegramOffset       int64             `json:"telegram_offset"`
-	UpdatedAt            time.Time         `json:"updated_at"`
+	TriagedSeen          []int          `json:"triaged_seen,omitempty"`
+	TriagedOrder         []int          `json:"triaged_order,omitempty"`
+	BaseBranch           string         `json:"base_branch,omitempty"`
+	ReviewedFingerprint  string         `json:"reviewed_fingerprint,omitempty"`
+	PublishedFingerprint string         `json:"published_fingerprint,omitempty"`
+	PublishedSHA         string         `json:"published_sha,omitempty"`
+	CIStartedAt          time.Time      `json:"ci_started_at,omitempty"`
+	StageRuns            map[string]int `json:"stage_runs,omitempty"`
+	CIReruns             map[string]int `json:"ci_reruns,omitempty"`
+	CIRerunAt            time.Time      `json:"ci_rerun_at,omitempty"`
+	Paused               bool           `json:"paused"`
+	ChatMode             bool           `json:"chat_mode"`
+	ChatHistory          []string       `json:"chat_history,omitempty"`
+	TelegramOffset       int64          `json:"telegram_offset"`
+	UpdatedAt            time.Time      `json:"updated_at"`
 }
 
 func DefaultState(cfg Config) State {
