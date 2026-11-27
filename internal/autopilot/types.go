@@ -23,6 +23,11 @@ type ModelProfile struct {
 	// For external providers
 	BaseURL string `yaml:"base_url"` // Compatible endpoint URL (Ollama, OpenAI, Anthropic-compatible)
 	APIKey  string `yaml:"api_key"`  // API key if authentication required
+	// rawAPIKey preserves the pre-expansion YAML value so the managed Pi
+	// registry can tell ${VAR} references (kept as env references) from
+	// literal keys (moved to child env). Set by ReadConfig before expansion;
+	// no YAML/JSON tags on purpose.
+	rawAPIKey string
 }
 
 type Config struct {
@@ -30,6 +35,9 @@ type Config struct {
 	Milestone string `yaml:"milestone"`
 	Label     string `yaml:"label"`
 	StateDir  string `yaml:"state_dir"`
+	// PiAgentDir locates the managed Pi agent directory (models.json); when
+	// set relative it resolves under StateDir. Default: <state_dir>/pi/agent.
+	PiAgentDir string `yaml:"pi_agent_dir"`
 	// Path is set by ReadConfig to the absolute configuration file location.
 	Path                string
 	PollSeconds         int                     `yaml:"poll_seconds"`
@@ -71,6 +79,13 @@ func ReadConfig(path string) (Config, error) {
 	decoder.KnownFields(true)
 	if err = decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("invalid config: %w", err)
+	}
+
+	// Preserve the pre-expansion api_key so the managed Pi registry can keep
+	// ${VAR} references as env references instead of inlined values.
+	for role, profile := range cfg.Models {
+		profile.rawAPIKey = profile.APIKey
+		cfg.Models[role] = profile
 	}
 
 	// Expand environment variables before validation

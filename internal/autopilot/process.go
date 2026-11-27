@@ -24,6 +24,25 @@ func command(ctx context.Context, dir, name string, args ...string) (string, err
 	return out, err
 }
 
+// commandWithEnv runs a command with an explicit environment (managed Pi
+// variables) instead of the inherited one.
+func commandWithEnv(ctx context.Context, dir string, env []string, name string, args ...string) (string, error) {
+	c := exec.CommandContext(ctx, name, args...)
+	if dir != "" {
+		c.Dir = dir
+	}
+	if env != nil {
+		c.Env = env
+	}
+	stdout, stderr := &limitedBuffer{limit: 2 << 20}, &limitedBuffer{limit: 2 << 20}
+	c.Stdout = stdout
+	c.Stderr = stderr
+	if err := c.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, truncate(stderr.String(), 1200))
+	}
+	return stdout.String(), nil
+}
+
 // commandCapped runs a command and captures stdout up to limit bytes. The
 // returned truncated flag lets callers distinguish complete output from a
 // capped capture instead of silently reviewing partial data.
@@ -214,6 +233,10 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	log.Printf("Pi session starting: role=%s provider=%s model=%s thinking=%s (log: %s)", role, provider, model, thinking, logPath)
 	c := exec.CommandContext(ctx, "pi", args...)
 	c.Dir = cwd
+	// Run against the managed agent/session directories from config.yaml; the
+	// user's global ~/.pi/agent is never touched. Managed variables win over
+	// inherited environment values.
+	c.Env = piChildEnv(cfg)
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		result.Err = err

@@ -36,6 +36,12 @@ func NewApp(cfg Config, botToken string) (*App, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		return nil, err
 	}
+	// The supervisor always runs Pi against the managed agent directory;
+	// fail startup loudly when the registry cannot be generated, rather than
+	// silently falling back to the user's global Pi configuration.
+	if err := SyncManagedPi(cfg); err != nil {
+		return nil, fmt.Errorf("managed Pi installation: %w", err)
+	}
 	lockFile, err := os.OpenFile(filepath.Join(cfg.StateDir, "supervisor.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
@@ -494,7 +500,7 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 		handoff = "Existing plan (plan.md):\n" + truncate(a.readArtifact(s.Issue.Number, "plan.md"), 12000) + "\n"
 	}
 	prompt = handoff + prompt
-	res := RunPi(ctx, a.cfg, dir, role, profile.Provider, profile.ID, profile.Thinking, prompt, path, readOnly)
+	res := RunPi(ctx, a.cfg, dir, role, PiProviderKey(profile), profile.ID, profile.Thinking, prompt, path, readOnly)
 	if res.Err != nil {
 		return res, fmt.Errorf("%s (log: %s)", res.Err, res.LogPath)
 	}

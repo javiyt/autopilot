@@ -272,7 +272,7 @@ func (a *App) recoverReviewVerdict(ctx context.Context, s State, issue Issue, an
 		prompt += "\nOperator note from after a previous failure (factor it into the verdict):\n" + s.RecoveryPrompt
 	}
 	prompt += "\nReviewer analysis:\n" + tailTruncate(analysis, 16000)
-	res := RunPi(ctx, a.cfg, a.checkout, "review", profile.Provider, profile.ID, profile.Thinking, prompt, path, true)
+	res := RunPi(ctx, a.cfg, a.checkout, "review", PiProviderKey(profile), profile.ID, profile.Thinking, prompt, path, true)
 	if res.Err != nil {
 		return res, fmt.Errorf("marker recovery pass failed: %w (log: %s)", res.Err, res.LogPath)
 	}

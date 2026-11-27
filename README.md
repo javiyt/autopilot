@@ -41,6 +41,34 @@ Instead of subagents, the supervisor manages state, tools, artifacts, and transi
 
 After CI correction, **local_verify, review, publish, and ci** repeat. Attempts are limited and prior reports are preserved.
 
+## Isolated Pi installation (managed models.json)
+
+The supervisor never reads or writes your global Pi configuration (`~/.pi/agent`). Every Pi session it launches runs with:
+
+- `PI_CODING_AGENT_DIR` → a managed agent directory inside `state_dir` (default `<state_dir>/pi/agent`, override with `pi_agent_dir` in `config.yaml`)
+- `PI_CODING_AGENT_SESSION_DIR` → `<state_dir>/pi/sessions`
+
+The managed directory contains only a generated `models.json` provider registry built from `config.yaml`:
+
+- **Providers**: `omlx` (local built-in), remote `omlx` (OpenAI-compatible at its `base_url`), `ollama` (local or remote, `/v1` normalized), `openai` / `openai-compatible`, `anthropic` / `anthropic-compatible`. Non-default endpoints are registered under host-suffixed provider keys (e.g. `omlx-remote-mac-studio:8000`) that `pi --provider` uses directly.
+- **Models**: every role model plus every `allowed_models` entry, so Telegram `/use` overrides always resolve in the isolated registry.
+- **Secrets stay out of disk**: `api_key: "${VAR}"` in YAML is written as an environment reference that Pi interpolates at request time; a literal key travels only in the Pi child process environment as `PI_AUTOPILOT_KEY_<PROVIDER>` and never appears in `models.json`, argv, or logs. `doctor`/`setup` print key *sources* only.
+
+```bash
+# Sync the managed installation from config.yaml (idempotent) and validate it
+./pi-autopilot setup -config config.yaml
+
+# doctor also validates the managed registry: it lists each role model under
+# the managed agent dir and reports every provider's key source.
+./pi-autopilot doctor -config config.yaml
+```
+
+Guarantees:
+
+- The user's global Pi config is untouched, and no `auth.json`/`settings.json`/extensions from the global directory load in supervisor sessions.
+- Registry mutations are **atomic** (temp file + fsync + rename) with a single rotating safe backup at `models.json.bak`; a config that fails validation never touches the existing registry (rollback = restore `.bak`, or simply re-run `setup` after fixing the YAML).
+- Re-running `setup` with unchanged config produces no visible mutation.
+
 ## Linux Installation
 
 ### Requirements
@@ -387,6 +415,9 @@ export PI_AUTOPILOT_TELEGRAM_TOKEN='YOUR_BOT_TOKEN'
 
 # Verify binaries and models
 ./pi-autopilot doctor -config config.yaml
+
+# Sync and validate the isolated Pi installation (idempotent)
+./pi-autopilot setup -config config.yaml
 
 # Discover chat ID if you don't have it
 ./pi-autopilot discover-chat
