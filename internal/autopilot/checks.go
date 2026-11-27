@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -23,16 +25,81 @@ import (
 // marks a real failure. TimedOut records whether the bounded context expired
 // (the process was killed), which is recorded distinctly from an exit-code
 // failure so the evidence never conflates the two.
+//
+// Blocked records the architecture-mismatch case (issue #9, AC-3): a check
+// constrained to an arch the host cannot run natively is never executed. It is
+// recorded as a non-zero, cause-labeled BLOCKED outcome so a missing/silent
+// skip is indistinguishable from failure — the gate fails unless a remote
+// runner satisfies the same check for the exact commit. Blocked checks carry
+// ExitCode 125 (the same non-zero sentinel as a launch failure) and a bounded
+// cause string, never an empty pass.
 type checkResult struct {
 	Output   string
 	ExitCode int
 	TimedOut bool
+	// Blocked is true when the check was constrained to an arch the host
+	// cannot run natively and was therefore not executed. Cause holds the
+	// reason ("arch-mismatch").
+	Blocked bool
+	Cause   string
+}
+
+// archBlockedCheck records a check the host could not run natively because of
+// an architecture constraint: the command and its declared arch. It is the unit
+// of remote-check satisfaction (issue #9, AC-2/AC-3/AC-6).
+type archBlockedCheck struct {
+	Cmd  string
+	Arch string
+}
+
+// archBlockedResult builds the deterministic, non-zero BLOCKED outcome for a
+// check whose architecture constraint the host cannot satisfy natively (issue
+// #9, AC-3). It is never executed: the outcome carries a bounded cause and the
+// non-zero sentinel 125 so the gate fails loudly. The evidence text is
+// self-contained (no external state) and names the required vs. host arch.
+func archBlockedResult(hostArch, want string) checkResult {
+	return checkResult{
+		Output:   fmt.Sprintf("BLOCKED: check requires architecture %q but this host is %q; not executed natively. Satisfy it with a remote-check runner on the required arch (or remove the constraint) — a silent skip is indistinguishable from failure.\n", want, hostArch),
+		ExitCode: 125,
+		Blocked:  true,
+		Cause:    "arch-mismatch",
+	}
+}
+
+// shouldBlockArch reports whether a check with the given arch constraint must
+// be blocked (not executed) on the running host: the constraint is concrete
+// (not "any") and does not match the host architecture.
+func shouldBlockArch(want string) bool {
+	return !platformAllows(runtime.GOARCH, want)
 }
 
 // runCheck executes one check under a bounded timeout and returns the full
 // captured output, the child exit code (0 on success) and whether the timeout
 // expired. The bounded timeout is the gate's own bound: a hung entrypoint can
 // at worst spend the budget, it cannot stall the phase forever.
+// checkEvidence builds the immutable evidence block for one executed (or
+// blocked) check (issue #9, AC-2): command, source, arch, the exact HEAD SHA,
+// started/ended timestamps, exit code, and a bounded cause line. Every executed
+// check's evidence records the commit SHA so a native or remote result stays
+// bound to the exact commit. cause is "timeout", "arch-mismatch", or omitted
+// for a clean pass/fail. It is deterministic given its inputs.
+func checkEvidence(cmd, source, arch, commit, started, ended string, exitCode int, timedOut, blocked bool, cause string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "command: %s\n", cmd)
+	fmt.Fprintf(&b, "source: %s\n", source)
+	fmt.Fprintf(&b, "arch: %s\n", arch)
+	fmt.Fprintf(&b, "commit: %s\n", commit)
+	fmt.Fprintf(&b, "started: %s\n", started)
+	fmt.Fprintf(&b, "ended: %s\n", ended)
+	fmt.Fprintf(&b, "exit code: %d\n", exitCode)
+	if blocked {
+		fmt.Fprintf(&b, "cause: %s\n", cause)
+	} else if timedOut {
+		fmt.Fprintf(&b, "cause: timeout\n")
+	}
+	return b.String()
+}
+
 func runCheck(ctx context.Context, dir, cmd string, timeout time.Duration) checkResult {
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -515,18 +516,53 @@ func (a *App) step(ctx context.Context, s State) error {
 		}
 		secrets := collectCheckSecrets(a.cfg, telegramTokenOf(a))
 		checkTimeout := 30 * time.Minute
+		// Every executed check's evidence records the exact HEAD SHA (issue #9,
+		// AC-2) so native and remote results stay bound to the exact commit.
+		headSHA, _ := command(ctx, a.checkout, "git", "rev-parse", "HEAD")
+		headSHA = strings.TrimSpace(headSHA)
+		// archForCheck resolves the architecture constraint of check i: the
+		// optional CheckArch parallel list element, defaulting to "any".
+		archForCheck := func(i int) string {
+			if i < len(a.cfg.CheckArch) {
+				return a.cfg.CheckArch[i]
+			}
+			return "any"
+		}
+		// blockedCheck tracks an arch-constrained check the host cannot run
+		// natively (recorded BLOCKED, non-zero); only a remote runner on that
+		// arch can satisfy it for the exact commit.
+		var blocked []archBlockedCheck
+		// realFailed tracks a failure from a check the host actually executed
+		// (exit code / timeout). BLOCKED arch-mismatch checks are tracked
+		// separately (blocked) so a remote runner can clear only their
+		// contribution to the phase outcome — never a real execution failure.
+		realFailed := false
 		for i, check := range checks {
 			started := time.Now().UTC()
+			arch := archForCheck(i)
+			// Architecture constraint (issue #9, AC-3): a check requiring an arch
+			// the host cannot run natively is never executed locally. It is
+			// recorded BLOCKED with a bounded cause (non-zero, never a silent
+			// skip); only a remote runner on that arch can satisfy it.
+			if shouldBlockArch(arch) {
+				res := archBlockedResult(runtime.GOARCH, arch)
+				logName := fmt.Sprintf("checks/local-%s-%d.log", started.Format("20060102T150405.000000000"), i+1)
+				full := checkEvidence(check, checkSources[i], arch, headSHA, started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), res.ExitCode, res.TimedOut, res.Blocked, res.Cause) + "output:\n" + res.Output + "\n"
+				if writeErr := a.storeArtifact(issue.Number, logName, redactSecrets(full, secrets)); writeErr != nil {
+					return writeErr
+				}
+				failed = true
+				blocked = append(blocked, archBlockedCheck{Cmd: check, Arch: arch})
+				fmt.Fprintf(&report, "- `%s` (%s): BLOCKED (arch %s not native here; exit %d, log: %s)\n", check, checkSources[i], arch, res.ExitCode, a.artifact(issue.Number, logName))
+				continue
+			}
 			res := runCheck(ctx, a.checkout, check, checkTimeout)
 			logName := fmt.Sprintf("checks/local-%s-%d.log", started.Format("20060102T150405.000000000"), i+1)
-			full := fmt.Sprintf("command: %s\nsource: %s\nstarted: %s\nended: %s\nexit code: %d\n", check, checkSources[i], started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), res.ExitCode)
-			if res.TimedOut {
-				full += "cause: timeout (" + checkTimeout.String() + ")\n"
-			}
-			full += "output:\n" + res.Output + "\n"
+			full := checkEvidence(check, checkSources[i], arch, headSHA, started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), res.ExitCode, res.TimedOut, res.Blocked, res.Cause) + "output:\n" + res.Output + "\n"
 			failedNow := res.ExitCode != 0
 			if failedNow {
 				failed = true
+				realFailed = true
 			}
 			if failedNow {
 				// A check that was already failing at the pre-implementation
@@ -545,6 +581,21 @@ func (a *App) step(ctx context.Context, s State) error {
 				return writeErr
 			}
 			fmt.Fprintf(&report, "- `%s` (%s): %s (exit %d, log: %s)\n", check, checkSources[i], map[bool]string{true: "FAIL", false: "PASS"}[failedNow], res.ExitCode, a.artifact(issue.Number, logName))
+		}
+		// Remote-check satisfaction (issue #9, AC-2/AC-3/AC-6): only the checks
+		// the host recorded BLOCKED (arch-mismatch) may be satisfied remotely,
+		// and only via the operator-configured same-repo runner pinned to this
+		// exact commit. A satisfied set clears ONLY the blocked contribution to
+		// `failed` (real execution failures still fail); a not-satisfied set or
+		// a missing runner keeps the phase failed. All other checks, fingerprints,
+		// review, CI and merge stages are untouched.
+		if len(blocked) > 0 {
+			if satisfied := a.satisfyRemoteBlocked(ctx, issue.Number, &report, headSHA, blocked, secrets); satisfied && !realFailed && !baselineFailed {
+				// Every executed check passed and every blocked check was satisfied
+				// remotely for this exact commit: the blocked-only failure is
+				// cleared so the phase proceeds to review.
+				failed = false
+			}
 		}
 		if len(excluded) > 0 {
 			fmt.Fprintf(&report, "\nChecks excluded by the verify model (not executed):\n")
@@ -871,6 +922,61 @@ func (a *App) step(ctx context.Context, s State) error {
 	default:
 		return fmt.Errorf("unknown workflow phase %q", s.Phase)
 	}
+}
+
+// satisfyRemoteBlocked resolves the checks the host recorded BLOCKED for
+// arch-mismatch (issue #9, AC-2/AC-3/AC-6). It consults the operator-configured
+// remote-check runner ONLY for the blocked set, dispatching the same-repo
+// workflow pinned to the exact head commit, under the configured/default bound.
+// It appends the remote evidence (source tag "remote" + commit) to the report
+// and stores a redacted remote log. It returns satisfied=true only when the
+// runner confirmed success AND headSha==local for the blocked set; any other
+// outcome (not configured, gh missing, dispatch/conclusion/timeout/sha-mismatch
+// failure) returns satisfied=false with a distinct block reason in the report.
+//
+// The caller uses the return to clear the blocked-only contribution to `failed`
+// when satisfied (a blocked-then-remote-satisfied set passes to review); when
+// not satisfied the phase stays failed and routes like a failure. It never
+// touches any non-blocked check, fingerprint, review, CI or merge stage.
+func (a *App) satisfyRemoteBlocked(ctx context.Context, issueNumber int, report *strings.Builder, headSHA string, blocked []archBlockedCheck, secrets []string) bool {
+	rc := a.cfg.RemoteChecks
+	// Distinct block when no runner is configured: an arch-constrained check
+	// cannot be satisfied without one. This is the "missing/silent skip is
+	// indistinguishable from failure" guarantee (AC-3).
+	if rc.Workflow == "" {
+		fmt.Fprintf(report, "\nRemote checks: NOT CONFIGURED — %d arch-constrained check(s) are BLOCKED and no remote_checks.workflow is set; the phase fails until a runner on the required arch is configured or the constraint is removed.\n", len(blocked))
+		for _, b := range blocked {
+			fmt.Fprintf(report, "- `%s` (arch %s): BLOCKED, no remote runner\n", b.Cmd, b.Arch)
+		}
+		return false
+	}
+	// Ensure gh is present before dispatch; a missing gh is a distinct block.
+	if err := ensureRemoteCheckDeps(); err != nil {
+		fmt.Fprintf(report, "\nRemote checks: gh missing — %v\n", err)
+		for _, b := range blocked {
+			fmt.Fprintf(report, "- `%s` (arch %s): BLOCKED, gh unavailable\n", b.Cmd, b.Arch)
+		}
+		return false
+	}
+	// Dispatch + poll the configured same-repo workflow pinned to the exact
+	// commit, under the configured/default bound.
+	out := RunRemoteChecks(ctx, a.checkout, rc, headSHA, defaultRemoteChecker())
+	logName := fmt.Sprintf("checks/remote-%s.log", time.Now().UTC().Format("20060102T150405.000000000"))
+	evidence := fmt.Sprintf("remote_checks: %s\nworkflow: %s\ncommit: %s\nrun id: %s\nheadSha (remote): %s\noutcome: %s\ndetail: %s\n", map[bool]string{true: "SATISFIED", false: "BLOCKED"}[out.Satisfied], rc.Workflow, headSHA, out.RunID, out.HeadSHA, out.Cause, out.Detail)
+	if writeErr := a.storeArtifact(issueNumber, logName, redactSecrets(evidence, secrets)); writeErr != nil {
+		// A storage failure is a real failure: keep the phase failed.
+		log.Printf("remote-check evidence store failed: %v", writeErr)
+		return false
+	}
+	fmt.Fprintf(report, "\nRemote checks (source: remote, commit: %s, log: %s):\n", headSHA, a.artifact(issueNumber, logName))
+	for _, b := range blocked {
+		if out.Satisfied {
+			fmt.Fprintf(report, "- `%s` (arch %s): SATISFIED by remote run %s at headSha %s\n", b.Cmd, b.Arch, out.RunID, out.HeadSHA)
+		} else {
+			fmt.Fprintf(report, "- `%s` (arch %s): REMOTE BLOCKED (%s: %s)\n", b.Cmd, b.Arch, out.Cause, out.Detail)
+		}
+	}
+	return out.Satisfied
 }
 
 func (a *App) complete(issue Issue) error {

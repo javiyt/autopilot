@@ -75,6 +75,14 @@ type Config struct {
 	AutoMerge           bool                    `yaml:"auto_merge"`
 	CheckCommand        string                  `yaml:"check_command"`
 	CheckCommands       []string                `yaml:"check_commands"`
+	// CheckArch is an optional parallel list to CheckCommands: element i is
+	// the architecture constraint ("any"/"amd64"/"arm64") of CheckCommands[i].
+	// Absent or shorter than CheckCommands means "any" for the rest, so an
+	// existing config with only check_commands parses unchanged. Each value is
+	// enum-validated at load time (safeTargetName-style guard): a bad value
+	// rejects the whole config rather than becoming a silent skip.
+	CheckArch         []string `yaml:"check_arch"`
+	RemoteChecks      RemoteChecks `yaml:"remote_checks"`
 	CIRerunPatterns     []string                `yaml:"ci_rerun_patterns"`
 	ProjectNumber       int                     `yaml:"project_number"`
 	ProjectOwner        string                  `yaml:"project_owner"`
@@ -89,6 +97,69 @@ type Config struct {
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// RemoteChecks declares the optional explicit remote-check runner (issue #9,
+// AC-6). When empty (the zero value), the feature is off and existing
+// deployments are unaffected (KnownFields(true) still rejects typos, and a
+// zero-value struct is simply absent from old configs). The runner dispatches
+// a same-repo GitHub Actions workflow pinned to the exact HEAD SHA via
+// `gh run create`, then polls it under a bounded timeout and accepts its
+// result only when the remote run's headSha equals local HEAD.
+type RemoteChecks struct {
+	// Workflow is the operator-named workflow file (e.g. "arm64-ci.yml") in
+	// the same repository that executes the architecture-specific checks. It
+	// must be a safe relative filename (no path separators, no metacharacters)
+	// because it is interpolated into a `gh run create` argument.
+	Workflow string `yaml:"workflow"`
+	// Ref is optional: when set it must be a full 40-hex SHA; when empty the
+	// runner dispatches the current HEAD. A non-SHA ref is rejected at load
+	// time (never a branch/tag that could point at different content).
+	Ref string `yaml:"ref"`
+	// TimeoutSeconds bounds how long local_verify waits for the remote run to
+	// finish; 0 means the default remoteCheckTimeout. Any other outcome (still
+	// running at the deadline, a non-success conclusion, a headSha mismatch)
+	// is a distinct block reason, never a vacuous pass.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+}
+
+var safeWorkflowName = regexp.MustCompile(`^[A-Za-z0-9_.-]+\.ya?ml$`)
+var fullSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// validateRemoteChecks enforces the AC-6 invariants at config load: the
+// workflow name is a safe relative filename, an explicit ref is a full 40-hex
+// SHA, and the timeout is non-negative. Empty workflow means the feature is
+// off and is always valid.
+func validateRemoteChecks(rc RemoteChecks) error {
+	if strings.TrimSpace(rc.Workflow) == "" {
+		// No runner configured: feature off, always valid.
+		return nil
+	}
+	if !safeWorkflowName.MatchString(rc.Workflow) {
+		return fmt.Errorf("remote_checks.workflow must be a relative .yml/.yaml filename (no path separators or metacharacters), got %q", rc.Workflow)
+	}
+	if rc.Ref != "" && !fullSHAPattern.MatchString(rc.Ref) {
+		return fmt.Errorf("remote_checks.ref must be a full 40-hex commit SHA (never a branch or tag), got %q", rc.Ref)
+	}
+	if rc.TimeoutSeconds < 0 {
+		return fmt.Errorf("remote_checks.timeout_seconds must be >= 0, got %d", rc.TimeoutSeconds)
+	}
+	return nil
+}
+
+// validateCheckArch enforces the enum on the optional per-check arch list:
+// every present value must be in the closed set, and the list must not be
+// longer than CheckCommands (an orphan arch with no command is a config bug).
+func validateCheckArch(checks, arch []string) error {
+	if len(arch) > len(checks) {
+		return fmt.Errorf("check_arch has %d entries but check_commands has %d: every arch must map to a command", len(arch), len(checks))
+	}
+	for i, a := range arch {
+		if !validArch(a) {
+			return fmt.Errorf("check_arch[%d] must be one of any/amd64/arm64 (or empty), got %q", i, a)
+		}
+	}
+	return nil
+}
 
 func ReadConfig(path string) (Config, error) {
 	var cfg Config
@@ -170,6 +241,24 @@ func ReadConfig(path string) (Config, error) {
 		if strings.TrimSpace(check) == "" {
 			return cfg, errors.New("check_commands must not contain empty entries")
 		}
+	}
+	// Per-check arch constraints (issue #9, AC-3/AC-6): every present value is
+	// enum-validated and the list must not outgrow check_commands. A bad value
+	// rejects the config rather than becoming a silent skip.
+	if err := validateCheckArch(cfg.CheckCommands, cfg.CheckArch); err != nil {
+		return cfg, err
+	}
+	// Remote-check runner (issue #9, AC-6): workflow name and ref are
+	// validated; empty means the feature is off.
+	if err := validateRemoteChecks(cfg.RemoteChecks); err != nil {
+		return cfg, err
+	}
+	// Normalize check_arch values to lowercase so a case-variant config
+	// (e.g. ARM64) stores the canonical form (arm64) that the evidence labels
+	// and the arch comparison both use. validateCheckArch already rejected any
+	// value outside {any, amd64, arm64}, so lowercasing here is safe.
+	for i, v := range cfg.CheckArch {
+		cfg.CheckArch[i] = strings.ToLower(v)
 	}
 	if cfg.Models == nil {
 		cfg.Models = map[string]ModelProfile{}
@@ -280,6 +369,14 @@ func (c Config) ExpandEnvironmentVariables() Config {
 	cfg.CIWaitMinutes = parseEnvInt(fmt.Sprintf("%d", cfg.CIWaitMinutes), cfg.CIWaitMinutes)
 	cfg.AutoMerge = parseEnvBool(fmt.Sprintf("%t", cfg.AutoMerge), cfg.AutoMerge)
 	cfg.CheckCommand = expandEnv(cfg.CheckCommand)
+	for i := range cfg.CheckArch {
+		cfg.CheckArch[i] = expandEnv(cfg.CheckArch[i])
+	}
+	rc := cfg.RemoteChecks
+	rc.Workflow = expandEnv(rc.Workflow)
+	rc.Ref = expandEnv(rc.Ref)
+	rc.TimeoutSeconds = parseEnvInt(fmt.Sprintf("%d", rc.TimeoutSeconds), rc.TimeoutSeconds)
+	cfg.RemoteChecks = rc
 	cfg.ManualRepo = expandEnv(cfg.ManualRepo)
 	cfg.ManualMilestone = expandEnv(cfg.ManualMilestone)
 

@@ -15,6 +15,7 @@ func Doctor(parent context.Context, cfg Config) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	var lines []string
+	lines = append(lines, "platform: "+platformLabel())
 	for _, tool := range []string{"git", "gh", "pi"} {
 		path, err := exec.LookPath(tool)
 		if err != nil {
@@ -34,6 +35,26 @@ func Doctor(parent context.Context, cfg Config) (string, error) {
 	}
 	lines = append(lines, strings.Split(managed, "\n")...)
 	return strings.Join(lines, "\n"), nil
+}
+
+// DoctorBrief is the PATH-only diagnosis (issue #9, AC-1): it reports the
+// platform ("<os>/<arch>") and the presence of git/gh/pi on PATH without
+// probing gh auth, manager sync, Pi model inventory, or remote endpoints, and
+// without a configured model. It performs no network calls and never requires
+// credentials, so a `linux/arm64` build starts and self-diagnoses on a bare
+// host. A missing tool is reported as a line, not an error: brief doctor is a
+// launch smoke, and the full `doctor` remains the authoritative gate.
+func DoctorBrief(ctx context.Context, cfg Config) string {
+	var lines []string
+	lines = append(lines, "platform: "+platformLabel())
+	for _, tool := range []string{"git", "gh", "pi"} {
+		if path, err := exec.LookPath(tool); err == nil {
+			lines = append(lines, tool+": "+path)
+		} else {
+			lines = append(lines, tool+": not-found")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ManagedDoctor validates the isolated Pi installation: it syncs the managed

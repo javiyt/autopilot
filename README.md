@@ -337,6 +337,12 @@ models:
 
 ## Windows Installation
 
+> **Note**: pi-autopilot does not build or run natively on Windows (the durable
+> state uses `syscall.Flock`, unavailable on Windows). On Windows, run it inside
+> WSL2 (a Linux distribution) as this section describes — the supervisor is a
+> `linux/*` process; the Ollama model may run on Windows and be reached over the
+> network.
+
 ### Requirements
 
 - **System**: Windows 10/11
@@ -633,18 +639,97 @@ gofmt -w cmd internal
 
 Includes YAML tests, merge policy, fingerprint with untracked files, handoffs, and memory failure recovery tests.
 
-## Cross-platform compatibility
+## Platform support
 
-The supervisor auto-detects the platform and suggests the most appropriate model provider:
+pi-autopilot is a Go module with **zero external runtime dependencies** beyond the
+Go standard library and the existing `go.yaml.in/yaml/v3` parser. It builds and
+runs natively on the unix targets this codebase supports:
 
-| Platform | Default provider | Recommended models |
+| Target | Status | Notes |
 | --- | --- | --- |
-| Linux | ollama | qwen2.5:7b, qwen2.5:1.5b |
-| macOS (Apple Silicon) | omlx | Qwen3.5-9B-MLX-8bit, Qwen3.8-27B-4bit |
-| macOS (Intel) | omlx | Qwen3.5-9B-MLX-8bit, Qwen3.8-27B-4bit |
-| Windows | ollama | qwen2.5:7b, qwen2.5:1.5b (via WSL2) |
+| `linux/amd64` | ✅ supported | primary server target |
+| `linux/arm64` | ✅ supported | Raspberry Pi 4/5 (64-bit) and other ARM64 Linux hosts |
+| `darwin/amd64` | ✅ supported | macOS Intel |
+| `darwin/arm64` | ✅ supported | macOS Apple Silicon (M-series) |
 
-You can override automatic selection by modifying the `provider` field in `config.yaml`.
+The supported set is cross-built and tested in CI (`TestCrossBuild`). Windows is
+**not** a supported build target: the durable state uses `syscall.Flock` for the
+single-instance lock, which is unavailable on Windows (see the note below).
+
+### `pi-autopilot version`
+
+The `version` action prints the build version and `GOOS`/`GOARCH` with zero
+dependencies — no config, no network, no credentials. It is the smoke test that
+a cross-compiled `linux/arm64` binary actually runs on its host:
+
+```
+$ ./pi-autopilot version
+pi-autopilot dev
+GOOS=linux GOARCH=arm64
+```
+
+The version string is injected at build time (release workflow) via
+`-ldflags "-X main.Version=<tag>"`; the development default is `dev`.
+
+### `pi-autopilot doctor --brief`
+
+`doctor --brief` is a PATH-only diagnosis: it reports `platform: <os>/<arch>`
+plus the presence of `git`/`gh`/`pi` on PATH, with no `gh auth` probe, no Pi
+model inventory, no endpoint probing, and no required model. A missing tool is
+reported as a `not-found` line, never an error — brief doctor is a launch smoke,
+and the full `pi-autopilot doctor` remains the authoritative gate. It performs
+no network calls and never requires credentials, so a `linux/arm64` build starts
+and self-diagnoses on a bare host.
+
+### Architecture-constrained local checks
+
+A check whose declared architecture the host cannot run natively is never
+executed locally: it is recorded `BLOCKED` (non-zero, bounded cause) in
+`local-checks.md` and only an operator-configured `remote_checks` runner on the
+required arch can satisfy it for the exact commit. Constrain a check with the
+`check_arch` list (parallel to `check_commands`; `any` | `amd64` | `arm64`)
+and point `remote_checks` at a same-repo, SHA-pinned GitHub Actions workflow:
+
+```yaml
+check_commands:
+  - go test ./...          # runs natively anywhere
+  - make arm64-check       # requires arm64 hardware
+check_arch:
+  - any
+  - arm64
+remote_checks:
+  workflow: "arm64-checks.yml"   # same-repo, SHA-pinned, no elevated permissions
+  timeout_seconds: 1800
+```
+
+The remote runner dispatches the workflow at the exact HEAD SHA, polls it under
+the configured bound, and accepts its result **only** when the run's `headSha`
+equals local HEAD and the conclusion is `success`. Any other outcome (dispatch
+failure, timeout, non-success conclusion, headSha mismatch, no runner configured)
+is a distinct block reason that keeps `local_verify` failed and routes like a
+failure — it never bypasses other gates.
+
+### Cross-compiling a linux/arm64 binary
+
+Because there is no platform-specific code outside the Go standard library's
+`syscall` (which provides `Flock` on both Linux and Darwin), you can
+cross-compile for a Raspberry Pi from any Go host:
+
+```bash
+go build -ldflags "-X main.Version=v1.2.3" -o pi-autopilot ./cmd/pi-autopilot
+GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=v1.2.3" -o pi-autopilot-linux-arm64 ./cmd/pi-autopilot
+```
+
+The module builds cleanly for all four supported targets with no CGO and no
+external runtime dependencies.
+
+### Windows note
+
+The durable state uses `syscall.Flock` for the single-instance lock, which is
+unavailable on Windows. The supervisor therefore does not support Windows as a
+build/run target; Windows-based model inference (Ollama on a Windows box)
+remains reachable over the network from a supported unix host, as described in
+the Ollama sections above.
 
 ## External Provider Support
 

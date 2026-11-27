@@ -78,6 +78,33 @@ auto_merge: false
 check_commands:
   - make check
 
+# Optional architecture constraint, parallel to check_commands (issue #9, AC-3).
+# check_arch[i] maps 1:1 onto check_commands[i] and accepts any (default),
+# amd64 or arm64. A check whose arch the host cannot run natively (e.g. an arm64
+# constraint on a linux/amd64 host) is never executed locally: it is recorded
+# BLOCKED with a bounded cause (non-zero, never a silent skip) and only the
+# remote_checks runner on that arch can satisfy it for the exact commit.
+# The list must not exceed check_commands; each value is enum-validated at
+# config load (any/amd64/arm64), so a typo blocks config load.
+# check_arch: [any, arm64]
+
+# Optional remote-check runner (issue #9, AC-6). Dispatches a same-repo GitHub
+# Actions workflow on the exact head commit to satisfy checks the host recorded
+# BLOCKED (arch-mismatch). It is an operator-named, same-repo, SHA-pinned
+# workflow with no elevated permissions; its result is accepted ONLY when the
+# run's headSha equals local HEAD and the conclusion is success — any other
+# outcome (dispatch failure, timeout, non-success, sha-mismatch) is a distinct
+# block reason that keeps local_verify failed and routes like a failure.
+# Empty workflow = feature off (today's exact behavior). ref is an optional
+# full 40-hex commit SHA (default: local HEAD at dispatch); timeout_seconds
+# bounds the wait (default 1800). The workflow name is validated to be a bare
+# filename (no path separator / metacharacter) since it is interpolated into a
+# gh run create argument.
+# remote_checks:
+#   workflow: "arm64-checks.yml"
+#   # ref: "0123456789abcdef0123456789abcdef01234567"   # optional; default HEAD
+#   timeout_seconds: 1800
+
 # Log substrings indicating known CI infrastructure failures
 # Only matching failures get one deterministic `gh run rerun --failed`
 ci_rerun_patterns:
