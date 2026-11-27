@@ -43,8 +43,9 @@ jobs:
       - name: Calculate version
         id: bump
         run: |
-          bin/bump-version > /dev/null
-          VERSION=$(grep "New version:" <<< "$(bin/bump-version)" | head -1 | awk '{print $4}')
+          OUTPUT=$(bin/bump-version)
+          echo "$OUTPUT"
+          VERSION=$(grep -m1 '^New version: ' <<< "$OUTPUT" | awk '{print $3}')
           echo "version=$VERSION" >> $GITHUB_ENV
           echo "Version calculated: $VERSION"
 
