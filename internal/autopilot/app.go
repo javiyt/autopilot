@@ -690,6 +690,17 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 	if err, preflight := a.remotePreflight(ctx, role, profile); err != nil {
 		return PiResult{Err: err}, &stageError{err: err, preflight: preflight}
 	}
+	// Web-search pre-flight (issue #7): an allowlisted role must run with the
+	// pinned extension installed and hash-verified. SyncWebSearchExtension is
+	// idempotent (a verified install is a no-op), so the check is cheap on the
+	// healthy path; any failure fails the stage — never a silent fallback to
+	// an extension-free session.
+	if a.cfg.WebSearchRoleAllowed(role) {
+		if err := SyncWebSearchExtension(ctx, a.cfg); err != nil {
+			wrapped := fmt.Errorf("%s stage: web search extension: %w", role, err)
+			return PiResult{Err: wrapped}, &stageError{err: wrapped}
+		}
+	}
 	session := time.Now().UTC().Format("20060102T150405.000000000")
 	sessionsDir := filepath.Join(a.cfg.StateDir, "sessions")
 	if s.Issue.Number > 0 {
