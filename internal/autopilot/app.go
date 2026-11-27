@@ -466,10 +466,16 @@ func (a *App) readArtifact(issueNumber int, name string) string {
 }
 
 func (a *App) runStage(ctx context.Context, s State, role, prompt string, readOnly bool) (string, error) {
-	return a.runStageIn(ctx, s, role, prompt, readOnly, a.checkout)
+	res, err := a.runStageIn(ctx, s, role, prompt, readOnly, a.checkout)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
 }
 
-func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, readOnly bool, dir string) (string, error) {
+// runStageIn runs one Pi session for a role and returns the full result:
+// Text is the final assistant message, FullText the whole session record.
+func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, readOnly bool, dir string) (PiResult, error) {
 	a.stageRunning.Store(true)
 	defer a.stageRunning.Store(false)
 	profile := a.modelFor(s, role)
@@ -490,7 +496,7 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 	prompt = handoff + prompt
 	res := RunPi(ctx, a.cfg, dir, role, profile.Provider, profile.ID, profile.Thinking, prompt, path, readOnly)
 	if res.Err != nil {
-		return "", fmt.Errorf("%s (log: %s)", res.Err, res.LogPath)
+		return res, fmt.Errorf("%s (log: %s)", res.Err, res.LogPath)
 	}
-	return res.Text, nil
+	return res, nil
 }

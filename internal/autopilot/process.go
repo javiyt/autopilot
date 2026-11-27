@@ -175,7 +175,11 @@ type piEvent struct {
 }
 
 type PiResult struct {
-	Text        string
+	// Text is the last assistant message: the stage's answer.
+	Text string
+	// FullText is every assistant text block of the session in order:
+	// the complete record a stage produced across its tool turns.
+	FullText    string
 	Err         error
 	FailureKind string
 	LogPath     string
@@ -228,6 +232,7 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	lastProgress.Store(time.Now().UnixNano())
 	var mu sync.Mutex
 	var stderrBuf bytes.Buffer
+	var fullText strings.Builder
 	var finalError string
 	var stopReason string
 	var sawSettled bool
@@ -271,6 +276,8 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 							for _, block := range event.Message.Content {
 								if block.Type == "text" && block.Text != "" {
 									result.Text = block.Text
+									fullText.WriteString(block.Text)
+									fullText.WriteString("\n")
 								}
 							}
 							if result.Text != "" {
@@ -361,6 +368,7 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	<-done
 	<-stderrDone
 	<-monitorDone
+	result.FullText = fullText.String()
 	mu.Lock()
 	stderrText := stderrBuf.String()
 	mu.Unlock()
@@ -378,6 +386,11 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 		result.Err = errors.New("Pi ended without a successful agent_settled event")
 	} else if stopReason == "error" || stopReason == "aborted" {
 		result.Err = errors.New("Pi final assistant message reported a failure")
+	} else if stopReason == "length" {
+		// A final message cut off at the output token limit is incomplete
+		// stage output; accepting it would let a truncated report or a
+		// missing required marker pass as a finished stage.
+		result.Err = errors.New("Pi final assistant message was cut off at the output token limit (stopReason=length); the stage output is incomplete")
 	} else if strings.TrimSpace(result.Text) == "" {
 		result.Err = errors.New("Pi returned no final assistant text")
 	}
