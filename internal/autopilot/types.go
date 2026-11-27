@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -339,15 +340,24 @@ func (c Config) applyManualConfig(s *State) error {
 	return nil
 }
 
-// detectPlatform returns the detected operating system.
+// detectPlatform returns the detected platform based on the binary's target.
 func detectPlatform() string {
-	if strings.Contains(strings.ToLower(os.Getenv("GOOS")), "darwin") {
-		if strings.Contains(strings.ToLower(os.Getenv("GOARCH")), "arm64") || strings.Contains(strings.ToLower(os.Getenv("GOARCH")), "aarch64") {
+	return detectPlatformFrom(runtime.GOOS, runtime.GOARCH)
+}
+
+// detectPlatformFrom is a pure helper that maps a GOOS/GOARCH pair to a
+// platform string. It exists so tests can exercise every branch without
+// depending on the host system.
+func detectPlatformFrom(goos, goarch string) string {
+	lower := strings.ToLower(goos)
+	if strings.Contains(lower, "darwin") {
+		arch := strings.ToLower(goarch)
+		if strings.Contains(arch, "arm64") || strings.Contains(arch, "aarch64") {
 			return "macos-arm64"
 		}
 		return "macos-amd64"
 	}
-	if strings.Contains(strings.ToLower(os.Getenv("GOOS")), "linux") {
+	if strings.Contains(lower, "linux") {
 		return "linux"
 	}
 	return "unknown"
