@@ -485,6 +485,14 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 	a.stageRunning.Store(true)
 	defer a.stageRunning.Store(false)
 	profile := a.modelFor(s, role)
+	// Remote no-fallback pre-flight (issue #5): when the role's profile points
+	// at a user-declared remote endpoint, verify it is reachable and accepts
+	// the credential *before* launching Pi. A down remote endpoint must fail
+	// this stage with an actionable error, never silently substitute a local
+	// provider (Ollama) for the model the plan was written for.
+	if err := a.remotePreflight(ctx, role, profile); err != nil {
+		return PiResult{Err: err}, err
+	}
 	session := time.Now().UTC().Format("20060102T150405.000000000")
 	sessionsDir := filepath.Join(a.cfg.StateDir, "sessions")
 	if s.Issue.Number > 0 {
@@ -505,4 +513,24 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 		return res, fmt.Errorf("%s (log: %s)", res.Err, res.LogPath)
 	}
 	return res, nil
+}
+
+// remotePreflight probes the role's remote endpoint before a Pi session is
+// launched. Only profiles with an explicit non-default base_url (a user-
+// declared remote endpoint) are checked; local providers and provider
+// defaults are skipped so the pre-flight adds latency only where the
+// Raspberry→Mac Studio (or similar) topology actually exists. It hard-fails
+// on connect and auth errors only; a catalog miss is left to Pi/doctor.
+func (a *App) remotePreflight(ctx context.Context, role string, profile ModelProfile) error {
+	if profile.BaseURL == "" || profile.Provider == "ollama" {
+		return nil
+	}
+	var cfg Config
+	cfg.Models = map[string]ModelProfile{"preflight": profile}
+	for _, res := range CheckRemoteEndpoints(ctx, nil, cfg) {
+		if res.Status == StatusUnreachable || res.Status == StatusAuthFailed {
+			return fmt.Errorf("%s stage: remote endpoint %s: %s — not falling back to a local provider; fix the endpoint or its credential", role, hostPortOf(profile.BaseURL), res.Message)
+		}
+	}
+	return nil
 }

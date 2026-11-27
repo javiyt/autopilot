@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -186,6 +187,13 @@ func ReadConfig(path string) (Config, error) {
 		}
 		cfg.Models["triage"] = profile
 	}
+	// Platform guard (issue #5): omlx without base_url is a macOS built-in.
+	// On any other host it would silently target a local runtime that does not
+	// exist (e.g. a Raspberry Pi quietly hitting Ollama with MLX model IDs).
+	// Fail at config load instead: the fix is a base_url or another provider.
+	if err := validateModelsForPlatform(cfg.Models, detectPlatform()); err != nil {
+		return cfg, err
+	}
 	if len(cfg.AllowedModels) == 0 {
 		return cfg, errors.New("allowed_models must have at least one model")
 	}
@@ -352,6 +360,29 @@ func (c Config) applyManualConfig(s *State) error {
 	s.StageRuns = map[string]int{}
 	s.CIReruns = map[string]int{}
 
+	return nil
+}
+
+// validateModelsForPlatform rejects profiles that silently target a runtime
+// absent on the running host. omlx without base_url is only meaningful on
+// macOS (built-in MLX); elsewhere it must carry an explicit base_url.
+// It takes the platform string (from detectPlatformFrom) so tests can
+// exercise every host without depending on the build system.
+func validateModelsForPlatform(models map[string]ModelProfile, platform string) error {
+	if platform == "macos-arm64" || platform == "macos-amd64" {
+		return nil
+	}
+	roles := make([]string, 0, len(models))
+	for role := range models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		p := models[role]
+		if p.Provider == "omlx" && p.BaseURL == "" {
+			return fmt.Errorf("models.%s: provider omlx without base_url is macOS-only; on this host set base_url to your remote OpenAI-compatible endpoint (e.g. your Mac Studio) or choose another provider", role)
+		}
+	}
 	return nil
 }
 

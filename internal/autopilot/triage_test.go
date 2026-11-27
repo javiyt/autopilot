@@ -297,11 +297,11 @@ func TestReadConfigTriageFallsBackToPlan(t *testing.T) {
 state_dir: ./work
 check_commands: ["go test ./..."]
 models:
-  investigate: {provider: omlx, id: reviewer, thinking: low}
-  plan: {provider: omlx, id: planner, thinking: medium}
-  implement: {provider: omlx, id: coder, thinking: "off"}
-  review: {provider: omlx, id: reviewer, thinking: low}
-  chat: {provider: omlx, id: reviewer, thinking: low}
+  investigate: {provider: ollama, id: reviewer, thinking: low}
+  plan: {provider: ollama, id: planner, thinking: medium}
+  implement: {provider: ollama, id: coder, thinking: "off"}
+  review: {provider: ollama, id: reviewer, thinking: low}
+  chat: {provider: ollama, id: reviewer, thinking: low}
 allowed_models: [planner, coder, reviewer]
 telegram_chat_id: 123
 `
@@ -320,12 +320,12 @@ telegram_chat_id: 123
 state_dir: ./work
 check_commands: ["go test ./..."]
 models:
-  investigate: {provider: omlx, id: reviewer, thinking: low}
-  plan: {provider: omlx, id: planner, thinking: medium}
-  implement: {provider: omlx, id: coder, thinking: "off"}
-  review: {provider: omlx, id: reviewer, thinking: low}
-  chat: {provider: omlx, id: reviewer, thinking: low}
-  triage: {provider: omlx, id: sneaky, thinking: low}
+  investigate: {provider: ollama, id: reviewer, thinking: low}
+  plan: {provider: ollama, id: planner, thinking: medium}
+  implement: {provider: ollama, id: coder, thinking: "off"}
+  review: {provider: ollama, id: reviewer, thinking: low}
+  chat: {provider: ollama, id: reviewer, thinking: low}
+  triage: {provider: ollama, id: sneaky, thinking: low}
 allowed_models: [planner, coder, reviewer]
 telegram_chat_id: 123
 `
@@ -344,11 +344,11 @@ func TestReadConfigAllowsEmptyRepoForManualMode(t *testing.T) {
 state_dir: ./work
 check_commands: ["go test ./..."]
 models:
-  investigate: {provider: omlx, id: reviewer, thinking: low}
-  plan: {provider: omlx, id: planner, thinking: medium}
-  implement: {provider: omlx, id: coder, thinking: "off"}
-  review: {provider: omlx, id: reviewer, thinking: low}
-  chat: {provider: omlx, id: reviewer, thinking: low}
+  investigate: {provider: ollama, id: reviewer, thinking: low}
+  plan: {provider: ollama, id: planner, thinking: medium}
+  implement: {provider: ollama, id: coder, thinking: "off"}
+  review: {provider: ollama, id: reviewer, thinking: low}
+  chat: {provider: ollama, id: reviewer, thinking: low}
 allowed_models: [planner, coder, reviewer]
 telegram_chat_id: 123
 `

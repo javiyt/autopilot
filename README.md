@@ -69,6 +69,58 @@ Guarantees:
 - Registry mutations are **atomic** (temp file + fsync + rename) with a single rotating safe backup at `models.json.bak`; a config that fails validation never touches the existing registry (rollback = restore `.bak`, or simply re-run `setup` after fixing the YAML).
 - Re-running `setup` with unchanged config produces no visible mutation.
 
+## Remote inference: Raspberry Pi (Linux ARM64) → Mac Studio
+
+The supervisor runs on a Raspberry Pi and sends inference to a Mac Studio
+over the LAN. The Pi hosts the supervisor; the Mac hosts the MLX model.
+
+### Mac side (serve the model)
+
+Serve the MLX model with an OpenAI-compatible server, e.g.
+`mlx_server --model <path> --port 8000`. Protect it with its own API key
+environment variable. The endpoint must answer `GET /models` (the model
+catalog) so the supervisor can validate the model ID before a stage runs.
+
+### Pi side (point config.yaml at the Mac)
+
+```yaml
+models:
+  plan:
+    provider: omlx
+    base_url: https://<mac-host>:8000/v1   # your Mac's LAN/Tailscale host
+    api_key: "${OMLX_API_KEY}"             # env reference, never inlined
+    id: Qwen3.8-27B-4bit
+```
+
+- `provider: omlx` with a `base_url` is a remote OpenAI-compatible endpoint;
+  without `base_url` it is the macOS built-in MLX provider (macOS-only — on
+  any other host the config is rejected at load time so a Raspberry Pi never
+  silently targets a local runtime that does not exist).
+- `api_key` must be an environment reference (`${VAR}`); the literal value is
+  resolved from the Pi's environment and sent only to the declared endpoint.
+
+### Preflight: `pi-autopilot doctor`
+
+`doctor` probes `GET /models` on every remote endpoint and:
+
+- exits **non-zero** with an actionable message when the endpoint is
+  unreachable or rejects the credential (check LAN route, firewall, that the
+  Mac process is bound, TLS, and that the env var is set);
+- prints a **WARNING** (not a failure) when a model ID is missing from an
+  otherwise-reachable catalog;
+- appends a transport warning for plain `http://` off-LAN endpoints.
+
+Run it before each run. When the Mac is off, the affected stage blocks with
+the doctor's actionable error — the supervisor never substitutes a local
+Ollama for the model the plan was written for.
+
+### Transport and credentials
+
+- Trusted-LAN `http` is acceptable but flagged; prefer a private network
+  (Tailscale) or an `https` reverse proxy.
+- The key travels only to the user-declared endpoint and never to logs,
+  `models.json`, argv, or Telegram output.
+
 ## Linux Installation
 
 ### Requirements

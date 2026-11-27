@@ -142,9 +142,18 @@ project_in_progress: "In Progress"
 #
 # 6. Remote oMLX server (OpenAI-compatible endpoint, e.g. mlx_server):
 #    provider: omlx
-#    base_url: https://mac-studio:8000/v1
+#    base_url: https://mac-studio.example:8000/v1
 #    api_key: "${OMLX_API_KEY}"   # env reference, never inlined
 #    id: Qwen3.8-27B-4bit
+#
+#    Raspberry Pi (Linux ARM64) → Mac Studio topology: serve the MLX model on
+#    the Mac with an OpenAI-compatible server (mlx_server --model ... --port
+#    8000), point base_url at it, and run `pi-autopilot doctor` as the
+#    pre-flight. doctor probes GET /models on the endpoint and exits non-zero
+#    with an actionable message when the endpoint is unreachable or rejects
+#    the credential — a down Mac blocks the stage with that error, never a
+#    silent fallback to a local Ollama. Plain http off-LAN gets a visible
+#    transport warning; prefer Tailscale or an https reverse proxy.
 #
 # ======================= API KEY SAFETY =======================
 # In the generated models.json, api_key values are environment references

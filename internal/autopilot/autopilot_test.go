@@ -2,6 +2,8 @@ package autopilot
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,11 +51,11 @@ func TestReadConfigYAML(t *testing.T) {
 state_dir: ./work
 check_commands: ["go test ./..."]
 models:
-  investigate: {provider: omlx, id: reviewer, thinking: low}
-  plan: {provider: omlx, id: planner, thinking: medium}
-  implement: {provider: omlx, id: coder, thinking: "off"}
-  review: {provider: omlx, id: reviewer, thinking: low}
-  chat: {provider: omlx, id: reviewer, thinking: low}
+  investigate: {provider: ollama, id: reviewer, thinking: low}
+  plan: {provider: ollama, id: planner, thinking: medium}
+  implement: {provider: ollama, id: coder, thinking: "off"}
+  review: {provider: ollama, id: reviewer, thinking: low}
+  chat: {provider: ollama, id: reviewer, thinking: low}
 allowed_models: [planner, coder, reviewer]
 telegram_chat_id: 123
 authorized_user_id: 987654321
@@ -475,5 +477,51 @@ func TestInvalidHandoffCannotOverrideMergePolicy(t *testing.T) {
 	}
 	if advanced, err := a.reconcileHandoff(a.snapshot()); err == nil || advanced {
 		t.Fatalf("policy escalation not rejected: advanced=%t err=%v", advanced, err)
+	}
+}
+
+// TestRunStageInRemotePreflightNoFallback verifies issue #5: when the role's
+// remote endpoint is down, runStageIn fails with an actionable error and
+// never launches Pi (no silent fallback to a local provider).
+func TestRunStageInRemotePreflightNoFallback(t *testing.T) {
+	dir := t.TempDir()
+	// A fake pi that records it was invoked. If the pre-flight works, this
+	// file must never be created.
+	dumpDir := filepath.Join(dir, "dump")
+	if err := os.MkdirAll(dumpDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "pi")
+	script := `#!/bin/sh
+touch "$AUTOPILOT_TEST_PI_INVOKED"
+printf '%s\n' '{"type":"agent_settled","aborted":false}' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"ok"}]}}'
+`
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AUTOPILOT_TEST_PI_INVOKED", filepath.Join(dumpDir, "invoked"))
+
+	// Bind then close a server to get a real dead port on localhost.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	stateDir := filepath.Join(dir, "state")
+	cfg := testConfig(stateDir)
+	// The implement role targets a remote omlx endpoint that is down.
+	cfg.Models["implement"] = ModelProfile{Provider: "omlx", BaseURL: deadURL + "/v1", ID: "coder", Thinking: "off"}
+	a := &App{cfg: cfg, checkout: dir, statePath: filepath.Join(stateDir, "state.json"), state: DefaultState(cfg)}
+
+	_, err := a.runStageIn(context.Background(), a.snapshot(), "implement", "test prompt", false, dir)
+	if err == nil {
+		t.Fatal("runStageIn must fail when the remote endpoint is unreachable")
+	}
+	if !strings.Contains(err.Error(), "not falling back to a local provider") {
+		t.Fatalf("error must be actionable and explicit about no fallback, got: %v", err)
+	}
+	// The fake pi must never have been invoked.
+	if _, err := os.Stat(filepath.Join(dumpDir, "invoked")); !os.IsNotExist(err) {
+		t.Fatal("Pi must not be launched when the remote endpoint is down")
 	}
 }

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -446,9 +449,19 @@ func TestManagedDoctorMissingModelWarningsAndKeySources(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// Stand up an httptest models server so the doctor's live remote endpoint
+	// check does not hit the real network (AC4: hermetic tests).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"planner"}]}`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
 	cfg := testConfig(dir)
 	const secret = "SENTINEL-SECRET-DO-NOT-LEAK"
-	cfg.Models["plan"] = ModelProfile{Provider: "openai-compatible", BaseURL: "http://llm.example.com/v1", ID: "planner", APIKey: secret}
+	cfg.Models["plan"] = ModelProfile{Provider: "openai-compatible", BaseURL: ts.URL + "/v1", ID: "planner", APIKey: secret}
 	out, err := ManagedDoctor(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("ManagedDoctor must not fail on missing models, only warn: %v", err)
@@ -459,7 +472,7 @@ func TestManagedDoctorMissingModelWarningsAndKeySources(t *testing.T) {
 	if !strings.Contains(out, "managed agent dir: "+filepath.Join(dir, "pi", "agent")) {
 		t.Fatalf("doctor must report the managed agent dir: %s", out)
 	}
-	if !strings.Contains(out, "literal in YAML (child env: PI_AUTOPILOT_KEY_OPENAI_COMPATIBLE_LLM_EXAMPLE_COM)") {
+	if !strings.Contains(out, "literal in YAML (child env: PI_AUTOPILOT_KEY_") {
 		t.Fatalf("doctor must print key sources: %s", out)
 	}
 	if strings.Contains(out, secret) {

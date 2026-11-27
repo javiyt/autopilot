@@ -82,6 +82,46 @@ func piProviderDefaultBaseURL(provider string) string {
 	return ""
 }
 
+// endpointURL returns the (baseURL, api) pair a profile maps to, applying
+// the provider defaults and normalization that BuildManagedModelsJSON writes
+// into models.json. It is the single source of truth shared with the remote
+// probe (remote.go): doctor and the stage pre-flight must hit exactly the
+// URL Pi would call, never a differently-normalized one.
+func endpointURL(baseURL, provider string) (string, string) {
+	switch provider {
+	case "omlx":
+		// Local omlx is a built-in provider (empty URL); a remote omlx
+		// speaks the OpenAI protocol at its base_url verbatim.
+		if baseURL == "" {
+			return "", ""
+		}
+		return baseURL, "openai-completions"
+	case "ollama":
+		if baseURL == "" {
+			baseURL = piProviderDefaultBaseURL("ollama")
+		}
+		if !strings.HasSuffix(baseURL, "/v1") {
+			baseURL += "/v1"
+		}
+		return baseURL, "openai-completions"
+	case "openai":
+		if baseURL == "" {
+			baseURL = piProviderDefaultBaseURL("openai")
+		}
+		return baseURL, "openai-completions"
+	case "openai-compatible":
+		return baseURL, "openai-completions"
+	case "anthropic":
+		if baseURL == "" {
+			baseURL = piProviderDefaultBaseURL("anthropic")
+		}
+		return baseURL, "anthropic-messages"
+	case "anthropic-compatible":
+		return baseURL, "anthropic-messages"
+	}
+	return baseURL, ""
+}
+
 // PiProviderKey is the single source of truth for the `pi --provider` value
 // and the provider key under which the model is registered in the managed
 // models.json. A non-default endpoint gets a host-suffixed custom key so two
@@ -265,45 +305,19 @@ func BuildManagedModelsJSON(cfg Config) ([]byte, error) {
 		}
 		key := PiProviderKey(p)
 		prov := ensure(key)
-		baseURL := p.BaseURL
+		baseURL, api := endpointURL(p.BaseURL, p.Provider)
 		switch p.Provider {
-		case "omlx":
-			// Local omlx is a built-in provider: model entries only. A
-			// remote omlx speaks the OpenAI protocol at its base_url verbatim.
-			if baseURL != "" {
-				prov.BaseURL, prov.API = baseURL, "openai-completions"
+		case "openai-compatible", "anthropic-compatible":
+			if p.BaseURL == "" {
+				return nil, fmt.Errorf("models.%s.base_url is required for provider %s", role, p.Provider)
 			}
 		case "ollama":
-			if baseURL == "" {
-				baseURL = piProviderDefaultBaseURL("ollama")
-			}
-			if !strings.HasSuffix(baseURL, "/v1") {
-				baseURL += "/v1"
-			}
 			if prov.BaseURL != "" && prov.BaseURL != baseURL {
 				return nil, fmt.Errorf("models.%s: provider ollama already registered with a different base_url", role)
 			}
-			prov.BaseURL, prov.API = baseURL, "openai-completions"
-		case "openai":
-			if baseURL == "" {
-				baseURL = piProviderDefaultBaseURL("openai")
-			}
-			prov.BaseURL, prov.API = baseURL, "openai-completions"
-		case "openai-compatible":
-			if baseURL == "" {
-				return nil, fmt.Errorf("models.%s.base_url is required for provider openai-compatible", role)
-			}
-			prov.BaseURL, prov.API = baseURL, "openai-completions"
-		case "anthropic":
-			if baseURL == "" {
-				baseURL = piProviderDefaultBaseURL("anthropic")
-			}
-			prov.BaseURL, prov.API = baseURL, "anthropic-messages"
-		case "anthropic-compatible":
-			if baseURL == "" {
-				return nil, fmt.Errorf("models.%s.base_url is required for provider anthropic-compatible", role)
-			}
-			prov.BaseURL, prov.API = baseURL, "anthropic-messages"
+		}
+		if baseURL != "" {
+			prov.BaseURL, prov.API = baseURL, api
 		}
 		if cred := creds[key]; cred.Ref != "" {
 			prov.APIKey = cred.Ref
