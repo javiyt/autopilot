@@ -105,9 +105,9 @@ type messageBlock struct {
 
 // loopTurnKey is the loop-detection key of one assistant turn: its text plus
 // the name and arguments of every tool call. A repeating preamble over
-// different reads produces different keys (progress); only an identical
-// action repeated 8 times is a loop. A text-less, call-less turn has an empty
-// key and never counts.
+// different reads produces different keys (progress); a turn is part of a
+// loop when turnCycle finds its fixed sequence repeating. A text-less,
+// call-less turn has an empty key and never counts.
 func loopTurnKey(text string, blocks []messageBlock) string {
 	key := text
 	for _, b := range blocks {
@@ -119,6 +119,37 @@ func loopTurnKey(text string, blocks []messageBlock) string {
 		return ""
 	}
 	return key
+}
+
+// turnCycle reports a fixed repetition inside the recent turn keys: the
+// smallest period p (1..4) for which the last max(8, 3*p) keys all repeat
+// with period p. p=1 is the identical action repeated 8 consecutive times;
+// p=2..4 catches cycles such as three different greps repeating in order,
+// which a consecutive-identical counter keeps resetting on. A window shorter
+// than the requirement yields no match, so a short session never trips the
+// detector.
+func turnCycle(recent []string) (period, window int) {
+	for p := 1; p <= 4; p++ {
+		w := 8
+		if 3*p > w {
+			w = 3 * p
+		}
+		if len(recent) < w {
+			continue
+		}
+		start := len(recent) - w
+		cycle := true
+		for i := start + p; i < len(recent); i++ {
+			if recent[i] != recent[i-p] {
+				cycle = false
+				break
+			}
+		}
+		if cycle {
+			return p, w
+		}
+	}
+	return 0, 0
 }
 
 type piEvent struct {
@@ -207,12 +238,11 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	go func() {
 		defer close(done)
 		reader := bufio.NewReader(stdout)
-		var prevAction string
-		var actionCount int
-		abortLoop := func(what string, count int) {
+		var recentTurns []string
+		abortLoop := func(desc string) {
 			if !loopDetected.Load() {
 				loopDetected.Store(true)
-				log.Printf("[pi %s] repetition loop detected (%d identical %s); aborting session", role, count, what)
+				log.Printf("[pi %s] repetition loop detected (%s); aborting session", role, desc)
 				cancel()
 			}
 		}
@@ -246,19 +276,20 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 							if result.Text != "" {
 								log.Printf("[pi %s] assistant: %s", role, truncate(strings.ReplaceAll(result.Text, "\n", " "), 160))
 							}
-							// A loop is a repeated ACTION: the same text plus the same
-							// tool calls. Repeating a preamble sentence across
-							// different reads is normal batching, not a loop; a bare
-							// thinking-only turn carries no key and never counts.
+							// A loop is a repeated ACTION SEQUENCE: the same text plus the
+							// same tool calls, repeated one by one (identical turns) or as
+							// a fixed cycle of up to 4 turns (different reads repeating in
+							// order). Repeating a preamble sentence across different reads
+							// is normal batching, not a loop; a bare thinking-only turn
+							// carries no key and never counts.
 							action := loopTurnKey(result.Text, event.Message.Content)
 							if action != "" {
-								if action == prevAction {
-									actionCount++
-								} else {
-									prevAction, actionCount = action, 1
+								recentTurns = append(recentTurns, action)
+								if len(recentTurns) > 12 {
+									recentTurns = recentTurns[len(recentTurns)-12:]
 								}
-								if actionCount >= 8 {
-									abortLoop("identical assistant turns", actionCount)
+								if p, w := turnCycle(recentTurns); p != 0 {
+									abortLoop(fmt.Sprintf("%d assistant turns repeating with period %d", w, p))
 								}
 							}
 						}
@@ -334,7 +365,7 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	stderrText := stderrBuf.String()
 	mu.Unlock()
 	if loopDetected.Load() {
-		result.Err = fmt.Errorf("repetition loop detected: the model repeated the same turn 8 consecutive times; session aborted (log: %s)", logPath)
+		result.Err = fmt.Errorf("repetition loop detected: the assistant repeated a fixed sequence of turns; session aborted (log: %s)", logPath)
 	} else if idleExceeded {
 		result.Err = errors.New("Pi did not emit output within the idle timeout")
 	} else if ctx.Err() != nil {
