@@ -57,8 +57,13 @@ ci_wait_minutes: 30
 # Once started, this policy is immutable for the issue
 auto_merge: false
 
-# Required check commands. All must pass.
-# If empty, supervisor will not simulate success
+# Local check commands suggested to the verify model as starting points.
+# The verify model reconciles them with the repository's build/CI definitions
+# and decides the final executed list; it drops a command the repository
+# cannot run (e.g. a make target without a Makefile) and records the
+# exclusion in local-checks.md. If the verify model is unavailable, these
+# commands plus the plan's checks run verbatim as the gate.
+# If empty and no checks are derivable, local verification blocks.
 check_commands:
   - make check
 
