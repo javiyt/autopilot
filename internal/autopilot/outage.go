@@ -185,14 +185,18 @@ type outageDecision struct {
 func decideOutage(host, phase string, state State, healthy bool, probeCount int, now time.Time) outageDecision {
 	d := outageDecision{Notified: state.RemoteNotified, ReminderAt: state.RemoteReminderAt, ProbeCount: probeCount}
 	if healthy {
-		// Online transition: notify exactly once per outage episode (the
-		// offline message was sent when Notified became true), then reset.
-		if state.RemoteOutageSince.IsZero() {
-			// No persisted episode (e.g. first probe already healthy): nothing owed.
-			return d
+		// Recovery confirmed: the wait loop must terminate on ANY healthy
+		// probe (ResetOutage), whether or not an episode was ever persisted.
+		// The episode fields are only written by an unhealthy probe, so a
+		// first probe that already finds the endpoint healthy (the server
+		// returned before the first recovery probe after an in-flight drop)
+		// would otherwise spin forever with nothing to reset.
+		if !state.RemoteOutageSince.IsZero() || state.RemoteNotified || state.RemoteProbeCount > 0 {
+			// Online transition: notify exactly once per persisted episode
+			// (the offline message was sent when Notified became true).
+			d.NotifyOnline = true
+			d.OnlineMessage = "✅ " + host + " back online; resuming " + phase + " with a fresh session"
 		}
-		d.NotifyOnline = true
-		d.OnlineMessage = "✅ " + host + " back online; resuming " + phase + " with a fresh session"
 		d.ResetOutage = true
 		d.Notified = false
 		d.ReminderAt = time.Time{}

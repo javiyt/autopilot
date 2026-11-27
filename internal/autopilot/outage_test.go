@@ -325,6 +325,44 @@ func TestOutageProbeAndResume(t *testing.T) {
 	}
 }
 
+// AC-2/AC-4 regression: the endpoint may already be healthy when the first
+// recovery probe runs (the server returned within seconds of an in-flight
+// drop). The wait loop must terminate on that first healthy probe instead of
+// spinning forever on an episode that was never persisted, and it must not
+// notify or persist anything.
+func TestWaitOutageEndpointAlreadyHealthy(t *testing.T) {
+	url, set, _ := flakyModelsServer(t)
+	set(true) // endpoint is up when the transient failure is handed over
+	shrinkOutageTiming(t, 20*time.Millisecond, 10*time.Millisecond)
+
+	dir := t.TempDir()
+	cfg := testConfig(dir)
+	profile := ModelProfile{Provider: "openai-compatible", BaseURL: url, ID: "coder", Thinking: "off"}
+	cfg.Models["plan"] = profile
+	a := &App{cfg: cfg, checkout: dir, statePath: filepath.Join(dir, "state.json"), state: DefaultState(cfg)}
+	if err := a.update(func(s *State) {
+		s.Issue = Issue{Number: 6, Title: "outage"}
+		s.Phase = "plan"
+		s.MergePolicy = "manual"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded ctx: the pre-fix hot loop would only exit on ctx expiry.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := a.handleStepFailure(ctx, "plan", errors.New("remote endpoint down (connection/transient)")); err != nil {
+		t.Fatalf("a first probe that already finds the endpoint healthy must return nil: %v", err)
+	}
+	s := a.snapshot()
+	if s.Attempts["plan"] != 0 || s.Phase == "blocked" {
+		t.Fatalf("already-healthy recovery must not burn retries: Attempts=%d phase=%q", s.Attempts["plan"], s.Phase)
+	}
+	if !s.RemoteOutageSince.IsZero() || s.RemoteHost != "" || s.RemoteProbeCount != 0 ||
+		!s.RemoteBackoffUntil.IsZero() || s.RemoteNotified || !s.RemoteReminderAt.IsZero() {
+		t.Fatalf("no outage episode may be persisted when the endpoint never went down: %+v", s)
+	}
+}
+
 // AC-3: repeated transient failures never exhaust the code-fix retry
 // counter; a following execution failure does burn it and blocks after
 // MaxStageRetries, exactly like today.
