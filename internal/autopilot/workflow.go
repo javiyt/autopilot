@@ -180,24 +180,31 @@ func (a *App) collectInvestigation(ctx context.Context, issue Issue) (string, er
 	}
 	// Establish the baseline BEFORE the implementation branch. The executor
 	// performs tests directly; an LLM is not spent launching shell commands.
-	baseline := make([]BaselineCheck, 0, len(a.cfg.CheckCommands))
+	// The baseline covers exactly the set local_verify will execute: the
+	// operator-configured checks plus the deterministically resolved checks
+	// (issue #8), so a resolved check that fails before implementation is a
+	// baseline blocker at local_verify, not a fresh rework.
+	resolvedBaseline, _ := resolveDeterministicChecks(a.checkout)
+	baselineChecks := mergeChecks(a.cfg.CheckCommands, resolvedBaseline)
+	baseline := make([]BaselineCheck, 0, len(baselineChecks))
+	secrets := collectCheckSecrets(a.cfg, telegramTokenOf(a))
 	var baselineReport strings.Builder
 	baselineReport.WriteString("# Baseline local checks (before implementation; no LLM)\n\n")
-	for i, cmd := range a.cfg.CheckCommands {
+	for i, cmd := range baselineChecks {
 		started := time.Now().UTC()
-		checkCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-		output, checkErr := command(checkCtx, a.checkout, "sh", "-c", cmd)
-		cancel()
+		res := runCheck(ctx, a.checkout, cmd, 30*time.Minute)
 		logName := fmt.Sprintf("checks/baseline-%d-%s.log", i+1, started.Format("20060102T150405.000000000"))
-		result := fmt.Sprintf("Command: %s\nStarted: %s\nOutput:\n%s\n", cmd, started.Format(time.RFC3339), output)
-		if checkErr != nil {
-			result += "Failure: " + checkErr.Error() + "\n"
+		result := fmt.Sprintf("Command: %s\nStarted: %s\nExit code: %d\n", cmd, started.Format(time.RFC3339), res.ExitCode)
+		if res.TimedOut {
+			result += "Cause: timeout (30m0s)\n"
 		}
-		if err := a.storeArtifact(issue.Number, logName, result); err != nil {
-			return "", err
+		result += "Output:\n" + res.Output + "\n"
+		failed := res.ExitCode != 0
+		if writeErr := a.storeArtifact(issue.Number, logName, redactSecrets(result, secrets)); writeErr != nil {
+			return "", writeErr
 		}
-		baseline = append(baseline, BaselineCheck{Command: cmd, Failed: checkErr != nil, Log: a.artifact(issue.Number, logName)})
-		fmt.Fprintf(&baselineReport, "- `%s`: %s (log: %s)\n", cmd, map[bool]string{true: "BASELINE FAILED", false: "BASELINE PASS"}[checkErr != nil], a.artifact(issue.Number, logName))
+		baseline = append(baseline, BaselineCheck{Command: cmd, Failed: failed, Log: a.artifact(issue.Number, logName)})
+		fmt.Fprintf(&baselineReport, "- `%s`: %s (exit %d, log: %s)\n", cmd, map[bool]string{true: "BASELINE FAILED", false: "BASELINE PASS"}[failed], res.ExitCode, a.artifact(issue.Number, logName))
 	}
 	if err := atomicJSON(a.artifact(issue.Number, "baseline.json"), baseline); err != nil {
 		return "", err

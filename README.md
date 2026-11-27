@@ -25,7 +25,7 @@ Instead of subagents, the supervisor manages state, tools, artifacts, and transi
 | `investigate` | **Go** collects issue, comments, timeline, PRs, tree, conventions and runs baseline checks; **Pi** analyzes relationships, requirements and code |
 | `plan` | **New Pi** with YAML planning model; must also emit a fenced `checks` block with the local verification commands that reproduce CI |
 | `implement` | **Go** creates/reuses branch; **New Pi** writes code and tests |
-| `local_verify` | **verify Pi (read-only)** inspects the repository's build/CI definitions and returns the command list (the plan's block is the starting point and the fallback); **Go + shell** then executes `check_commands` plus that list, deduplicated and filtered to canonical entrypoints, with logs and content fingerprint |
+| `local_verify` | **Go** first resolves the check list deterministically from the repository's discoverable entrypoints (Go, Node, Makefile, GitHub Actions `run:` steps) — no model for a resolvable repo; the **verify Pi (read-only)** is consulted only when nothing is discoverable (its list is the authoritative fallback, the plan's block the last resort). **Go + shell** then executes the merged list (`check_commands` → resolved → plan → model), deduplicated in that stable order, filtered to canonical entrypoint roots, each under a bounded timeout with recorded exit code / timeout cause; logs are stored redacted for known secrets, plus the content fingerprint |
 | `review` | **New Pi read-only**, YAML reviewer model and decision `APPROVE` / `REQUEST_CHANGES` |
 | `publish` | **Go + Git + gh** commit, push, and create/update exactly one PR |
 | `ci` | **Go + gh** inspect CI for current SHA; retrieve logs and re-run only demonstrated infrastructure failures |

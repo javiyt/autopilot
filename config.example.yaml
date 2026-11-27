@@ -66,12 +66,15 @@ ci_wait_minutes: 30
 auto_merge: false
 
 # Local check commands suggested to the verify model as starting points.
-# The verify model reconciles them with the repository's build/CI definitions
-# and decides the final executed list; it drops a command the repository
-# cannot run (e.g. a make target without a Makefile) and records the
-# exclusion in local-checks.md. If the verify model is unavailable, these
-# commands plus the plan's checks run verbatim as the gate.
-# If empty and no checks are derivable, local verification blocks.
+# These are still the operator-authoritative source (check_commands). The
+# verify model no longer re-decides a resolvable repository: when the repo's
+# entrypoints are discoverable (Go, Node, Makefile, GitHub Actions run: steps)
+# the list is chosen deterministically with no LLM, in the order
+# check_commands -> resolved -> plan -> model, with every command filtered to
+# the canonical entrypoint allowlist. The model is consulted only when nothing
+# is discoverable; it drops a command the repository cannot run and records the
+# exclusion in local-checks.md. If empty and nothing is resolvable, local
+# verification blocks.
 check_commands:
   - make check
 
@@ -204,6 +207,9 @@ models:
 
   # verify is optional: it inspects the repository's build/CI definitions and
   # returns the list of local commands the deterministic verifier executes.
+  # It is consulted ONLY when the repository's entrypoints are not resolvable
+  # deterministically (no Go/Node/Makefile/Actions entrypoint); a resolvable
+  # repository never spends a model call to discover its checks (issue #8).
   # An absent or empty entry inherits the plan model; if the model run fails,
   # the plan's own checks block is used instead.
   verify:
