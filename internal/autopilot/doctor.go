@@ -80,5 +80,20 @@ func ManagedDoctor(parent context.Context, cfg Config) (string, error) {
 	for _, key := range keys {
 		lines = append(lines, "provider "+key+" key source: "+creds[key].Source)
 	}
+	// Live remote endpoint/model check (issue #5): unreachable or
+	// auth-failed remote endpoints are a hard doctor failure so the operator
+	// gets a fix before a stage burns an attempt; a model missing from an
+	// otherwise-reachable catalog is only a WARNING.
+	for _, res := range CheckRemoteEndpoints(ctx, nil, cfg) {
+		roles := strings.Join(res.Roles, "/")
+		switch res.Status {
+		case StatusOK:
+			lines = append(lines, roles+" endpoint: "+res.Message)
+		case StatusModelNotFound:
+			lines = append(lines, "WARNING: "+roles+" endpoint: "+res.Message)
+		default: // StatusUnreachable, StatusAuthFailed
+			return "", fmt.Errorf("%s endpoint: %s", roles, res.Message)
+		}
+	}
 	return strings.Join(lines, "\n"), nil
 }
