@@ -116,3 +116,55 @@ bump-version
 ## License
 
 MIT
+
+## GitHub Actions Integration
+
+A GitHub Actions workflow is available at `.github/workflows/release.yml` that automates the release process.
+
+### Features
+
+- **Triggered on**: Pushes to the `main` branch with Go code changes
+- **Version Calculation**: Uses the `bump-version` tool to calculate the next SemVer version
+- **Git Tag Creation**: Automatically creates and pushes version tags (e.g., `v1.0.0`)
+- **Release Notes Generation**: Creates markdown release notes
+- **GitHub Release Creation**: Publishes a draft release on GitHub
+
+### Requirements
+
+To enable this workflow, you need to:
+
+1. Have a GitHub repository
+2. The workflow will use the automatic `GITHUB_TOKEN` for creating tags and drafts
+3. For fully published releases (not drafts), configure a personal access token as `GITHUB_TOKEN` secret
+
+### Workflow Steps
+
+1. **Checkout Code**: Fetches full git history
+2. **Setup Go**: Installs the required Go version
+3. **Build Tool**: Compiles the `bump-version` binary
+4. **Calculate Version**: Runs version calculation
+5. **Create Tag**: Pushes Git tag to remote
+6. **Generate Release Notes**: Creates markdown release notes
+7. **Create Release**: Publishes draft release on GitHub
+
+### Manual Override
+
+To run the workflow manually or override version calculation:
+
+```bash
+# Run bump-version manually
+bump-version
+
+# Create tag manually
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+### Customization
+
+To customize the release workflow:
+
+1. Edit `.github/workflows/release.yml`
+2. Change trigger conditions in `on:` section
+3. Modify release note templates
+4. Adjust GitHub CLI permissions as needed
