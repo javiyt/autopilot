@@ -123,6 +123,16 @@ func (a *App) update(fn func(*State)) error {
 	return atomicJSON(a.statePath, a.state)
 }
 
+// telegramTokenOf returns the configured Telegram token value, or "" when no
+// Telegram bot is configured. The token value is used only to redact check
+// logs (issue #8); it is never logged or written to disk.
+func telegramTokenOf(a *App) string {
+	if a.telegram == nil {
+		return ""
+	}
+	return a.telegram.token
+}
+
 func (a *App) notify(message string) {
 	log.Println(message)
 	if a.telegram == nil {

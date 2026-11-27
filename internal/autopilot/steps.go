@@ -37,32 +37,108 @@ func parsePlanChecks(planText string) []string {
 	return checks
 }
 
-// selectVerifyChecks decides which commands local_verify executes. When the
-// verify model produced a parsable list, that list is authoritative: Go
-// executes it as is, and configured checks the model did not include are
-// returned separately so the caller records the exclusion as evidence.
-// When the model produced nothing, the deterministic fallback joins the
-// configured checks with the plan-derived ones.
-func selectVerifyChecks(configured, plan, derived []string, modelOK bool) (checks, excluded []string) {
-	if !modelOK {
-		return mergeChecks(configured, plan), nil
+// selectVerifyChecks decides which commands local_verify executes and the
+// source tag of each. Precedence and stable order are:
+//
+//	configured -> resolved -> plan -> model
+//
+// configured is the operator-authoritative list (check_commands). resolved is
+// the deterministic resolver output (no LLM). plan is the plan's checks block,
+// filtered to the canonical-allowlist roots (it runs verbatim only when it is
+// the last-resort source, and is always filtered — the old asymmetry where plan
+// checks executed unfiltered on the model-failure path is closed here). model
+// is the verify model's list, which is already allowlist-filtered by
+// parseVerifyCommands.
+//
+// Two distinct paths:
+//
+//  1. Deterministic path (modelOK == false AND resolved non-empty, i.e. the
+//     resolver found entrypoints so the model was never consulted): the final
+//     list is configured + resolved + plan, deduped in that order. There are no
+//     "excluded" checks because the model did not adjudicate anything.
+//
+//  2. Model path (modelOK == true): the model list is authoritative; configured
+//     checks it did not include are returned separately so the caller records
+//     the exclusion as evidence. resolved and plan that the model omitted are
+//     likewise excluded (they were starting points for the model).
+//
+//  3. Fallback path (modelOK == false AND resolved empty, i.e. the resolver
+//     found nothing and the model failed or returned nothing): the final list
+//     is configured + plan (both sources are already the deterministic facts;
+//     plan is filtered). No exclusion is recorded.
+//
+// Every returned check has a source tag: "config", "resolved", "plan" or
+// "verify" (model).
+func selectVerifyChecks(configured, resolved, plan, derived []string, modelOK bool) (checks, sources, excluded []string) {
+	plan = filterToAllowedRoots(plan, verifyCmdRoots)
+	if modelOK {
+		// Model path: the model list is authoritative.
+		inDerived := map[string]bool{}
+		for _, cmd := range derived {
+			inDerived[strings.TrimSpace(cmd)] = true
+		}
+		// The model list itself.
+		for _, cmd := range derived {
+			cmd = strings.TrimSpace(cmd)
+			if cmd == "" {
+				continue
+			}
+			inDerived[cmd] = true
+			checks = append(checks, cmd)
+			sources = append(sources, "verify")
+		}
+		// Configured/resolved/plan the model did not include become exclusions.
+		for _, cmd := range configured {
+			cmd = strings.TrimSpace(cmd)
+			if cmd != "" && !inDerived[cmd] {
+				excluded = append(excluded, cmd)
+			}
+		}
+		for _, cmd := range resolved {
+			cmd = strings.TrimSpace(cmd)
+			if cmd != "" && !inDerived[cmd] {
+				excluded = append(excluded, cmd)
+			}
+		}
+		for _, cmd := range plan {
+			cmd = strings.TrimSpace(cmd)
+			if cmd != "" && !inDerived[cmd] {
+				excluded = append(excluded, cmd)
+			}
+		}
+		return checks, sources, excluded
 	}
-	inDerived := map[string]bool{}
-	for _, cmd := range derived {
-		inDerived[strings.TrimSpace(cmd)] = true
+
+	// Deterministic or fallback path: merge in precedence order, dedup, stable.
+	seen := map[string]bool{}
+	add := func(cmd, tag string) {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" || seen[cmd] {
+			return
+		}
+		seen[cmd] = true
+		checks = append(checks, cmd)
+		sources = append(sources, tag)
 	}
 	for _, cmd := range configured {
-		cmd = strings.TrimSpace(cmd)
-		if cmd != "" && !inDerived[cmd] {
-			excluded = append(excluded, cmd)
-		}
+		add(cmd, "config")
 	}
-	return derived, excluded
+	for _, cmd := range resolved {
+		add(cmd, "resolved")
+	}
+	for _, cmd := range plan {
+		add(cmd, "plan")
+	}
+	return checks, sources, nil
 }
 
 // mergeChecks joins the configured checks with the plan-derived ones, keeping
-// the configured checks first and dropping exact duplicates.
+// the configured checks first and dropping exact duplicates. Plan checks are
+// filtered to the canonical-allowlist roots: a plan derived from injected
+// issue content must not run an untrusted command just because the model is
+// unavailable. (Used by the implement-stage self-check and the baseline set.)
 func mergeChecks(configured, plan []string) []string {
+	plan = filterToAllowedRoots(plan, verifyCmdRoots)
 	seen := map[string]bool{}
 	var checks []string
 	for _, cmd := range append(append([]string{}, configured...), plan...) {
@@ -393,7 +469,7 @@ func (a *App) step(ctx context.Context, s State) error {
 
 	case "local_verify":
 		var report strings.Builder
-		report.WriteString("# Local verification (check list derived by the verify model; every command executed deterministically by Go)\n\n")
+		report.WriteString("# Local verification (deterministic resolution first; the verify model is consulted only when the repository defines no discoverable entrypoint; every command executed deterministically by Go)\n\n")
 		failed := false
 		baselineFailed := false
 		var baseline []BaselineCheck
@@ -402,47 +478,62 @@ func (a *App) step(ctx context.Context, s State) error {
 				return fmt.Errorf("invalid baseline evidence: %w", err)
 			}
 		}
+		// Baseline set by command: every check recorded at investigate is
+		// compared here, so a resolved check that failed before implementation
+		// is a baseline blocker, not a fresh rework.
+		baselineCmds := map[string]bool{}
+		for _, previous := range baseline {
+			baselineCmds[previous.Command] = true
+		}
 		planChecks := []string{}
 		if data := a.readArtifact(issue.Number, "plan-checks.json"); data != "" {
 			if err := json.Unmarshal([]byte(data), &planChecks); err != nil {
 				planChecks = []string{}
 			}
 		}
-		// The verify model inspects the repository's own build/CI definitions
-		// plus the configured check commands and returns the final list; Go
-		// executes it as is. Configured checks the model did not include are
-		// dropped on purpose (the repository cannot run them) and recorded as
-		// an exclusion below. If the model run fails or yields nothing
-		// parsable, the deterministic fallback executes the configured checks
-		// plus the plan's checks block, so a model outage never voids the gate.
+		// Deterministic resolution first (issue #8): when the repository's
+		// entrypoints are discoverable (Go, Node, Makefile, or GitHub Actions
+		// run: steps), the check list is chosen with no verify-model invocation.
+		// The model is consulted only when the resolver finds nothing, and it
+		// then reconciles with the repository's actual build/CI definitions.
+		resolvedChecks, resolvedOK := resolveDeterministicChecks(a.checkout)
 		var derivedChecks []string
 		derivedIsModel := false
-		if llm, ok := a.deriveVerifyCommands(ctx, s, issue, planChecks, a.cfg.CheckCommands); ok {
-			derivedChecks, derivedIsModel = llm, true
+		if !resolvedOK {
+			// No discoverable entrypoint: fall back to the verify model. Its
+			// list, when parsable, is authoritative; a model failure falls back
+			// to configured plus plan, so a model outage never voids the gate.
+			if llm, ok := a.deriveVerifyCommands(ctx, s, issue, planChecks, a.cfg.CheckCommands); ok {
+				derivedChecks, derivedIsModel = llm, true
+			}
 		}
-		cfgChecks := map[string]bool{}
-		for _, cmd := range a.cfg.CheckCommands {
-			cfgChecks[cmd] = true
-		}
-		checks, excludedConfigured := selectVerifyChecks(a.cfg.CheckCommands, planChecks, derivedChecks, derivedIsModel)
+		checks, checkSources, excluded := selectVerifyChecks(a.cfg.CheckCommands, resolvedChecks, planChecks, derivedChecks, derivedIsModel)
 		if len(checks) == 0 {
-			// No configured checks and no model- or plan-derived list: a
-			// vacuous pass would fake success, so the phase blocks.
-			return errors.New("local verification has no checks: nothing is configured in check_commands, the verify model returned no parsable commands, and the plan emitted no checks block")
+			// No configured, resolved, plan- or model-derived list: a vacuous
+			// pass would fake success, so the phase blocks.
+			return errors.New("local verification has no checks: nothing is configured in check_commands, no discoverable entrypoint was resolved, the verify model returned no parsable commands, and the plan emitted no checks block")
 		}
+		secrets := collectCheckSecrets(a.cfg, telegramTokenOf(a))
+		checkTimeout := 30 * time.Minute
 		for i, check := range checks {
 			started := time.Now().UTC()
-			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-			out, err := command(checkCtx, a.checkout, "sh", "-c", check)
-			cancel()
+			res := runCheck(ctx, a.checkout, check, checkTimeout)
 			logName := fmt.Sprintf("checks/local-%s-%d.log", started.Format("20060102T150405.000000000"), i+1)
-			full := fmt.Sprintf("command: %s\nstarted: %s\nended: %s\noutput:\n%s\n", check, started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), out)
-			if err != nil {
+			full := fmt.Sprintf("command: %s\nsource: %s\nstarted: %s\nended: %s\nexit code: %d\n", check, checkSources[i], started.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339), res.ExitCode)
+			if res.TimedOut {
+				full += "cause: timeout (" + checkTimeout.String() + ")\n"
+			}
+			full += "output:\n" + res.Output + "\n"
+			failedNow := res.ExitCode != 0
+			if failedNow {
 				failed = true
-				full += "failure: " + err.Error() + "\n"
-				// Only configured checks were recorded in the pre-implementation
-				// baseline; a plan-derived check that fails here is a new failure.
-				if cfgChecks[check] {
+			}
+			if failedNow {
+				// A check that was already failing at the pre-implementation
+				// baseline is a baseline blocker (needs explicit investigation),
+				// not a fresh rework. This covers configured, resolved, plan and
+				// model sources alike.
+				if baselineCmds[check] {
 					for _, previous := range baseline {
 						if previous.Command == check && previous.Failed {
 							baselineFailed = true
@@ -450,21 +541,14 @@ func (a *App) step(ctx context.Context, s State) error {
 					}
 				}
 			}
-			if writeErr := a.storeArtifact(issue.Number, logName, full); writeErr != nil {
+			if writeErr := a.storeArtifact(issue.Number, logName, redactSecrets(full, secrets)); writeErr != nil {
 				return writeErr
 			}
-			source := "plan"
-			if derivedIsModel {
-				source = "verify"
-			}
-			if cfgChecks[check] {
-				source = "config"
-			}
-			fmt.Fprintf(&report, "- `%s` (%s): %s (log: %s)\n", check, source, map[bool]string{true: "FAIL", false: "PASS"}[err != nil], a.artifact(issue.Number, logName))
+			fmt.Fprintf(&report, "- `%s` (%s): %s (exit %d, log: %s)\n", check, checkSources[i], map[bool]string{true: "FAIL", false: "PASS"}[failedNow], res.ExitCode, a.artifact(issue.Number, logName))
 		}
-		if len(excludedConfigured) > 0 {
-			fmt.Fprintf(&report, "\nConfigured checks excluded by the verify model (not executed):\n")
-			for _, cmd := range excludedConfigured {
+		if len(excluded) > 0 {
+			fmt.Fprintf(&report, "\nChecks excluded by the verify model (not executed):\n")
+			for _, cmd := range excluded {
 				fmt.Fprintf(&report, "- `%s`\n", cmd)
 			}
 		}
