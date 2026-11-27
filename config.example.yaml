@@ -25,6 +25,14 @@ label: ""
 # Directory for state and artifacts (relative to config)
 state_dir: ./autopilot-state
 
+# Managed (isolated) Pi agent directory holding the generated models.json.
+# All supervisor Pi sessions run with PI_CODING_AGENT_DIR pointing here, so
+# your global ~/.pi/agent is never read or modified. Relative values resolve
+# under state_dir; default: <state_dir>/pi/agent. Sessions live in
+# <state_dir>/pi/sessions. Regenerate any time with:
+#   ./pi-autopilot setup -config config.yaml
+# pi_agent_dir: ./pi/agent
+
 # Polling interval (seconds) for checking new issues
 poll_seconds: 60
 
@@ -131,6 +139,19 @@ project_in_progress: "In Progress"
 #    base_url: http://llm-custom.example.com/v1
 #    api_key: ""  # or API_KEY_DEL_SERVIDOR
 #    id: your-model-name
+#
+# 6. Remote oMLX server (OpenAI-compatible endpoint, e.g. mlx_server):
+#    provider: omlx
+#    base_url: https://mac-studio:8000/v1
+#    api_key: "${OMLX_API_KEY}"   # env reference, never inlined
+#    id: Qwen3.8-27B-4bit
+#
+# ======================= API KEY SAFETY =======================
+# In the generated models.json, api_key values are environment references
+# ($NAME / ${NAME}) that Pi interpolates at request time. A literal key in
+# this file is delivered to Pi only through the child process environment
+# (PI_AUTOPILOT_KEY_*) and is never written to disk or process arguments.
+# Preferred: api_key: "${OPENAI_API_KEY}" (any env variable name).
 #
 # ======================= CONFIGURATION =======================
 models:

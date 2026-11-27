@@ -16,11 +16,12 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|triage|status|doctor|discover-chat|service|bump> -config /path/config.yaml [options]")
+	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|triage|status|doctor|setup|discover-chat|service|bump> -config /path/config.yaml [options]")
 	fmt.Fprintln(os.Stderr, "  run: optional -once to process one issue then exit")
 	fmt.Fprintln(os.Stderr, "  triage: plan the issue queue once and print the order without executing")
 	fmt.Fprintln(os.Stderr, "  status: show durable state without contacting Pi or GitHub")
 	fmt.Fprintln(os.Stderr, "  doctor: check local binaries and registered Pi models")
+	fmt.Fprintln(os.Stderr, "  setup: sync the managed (isolated) Pi installation from config.yaml and validate it")
 	fmt.Fprintln(os.Stderr, "  discover-chat: show Telegram chat IDs after sending /start to your bot")
 	fmt.Fprintln(os.Stderr, "  service <install|uninstall|start|stop|status>: manage the user-level system service (launchd or systemd user)")
 	fmt.Fprintln(os.Stderr, "  bump: bump SemVer version for new main commit")
@@ -141,6 +142,19 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		fmt.Println(strings.TrimSpace(out))
+	case "setup":
+		// Idempotent: regenerating identical config.yaml bytes leaves the
+		// managed registry untouched; a previous registry is backed up to
+		// models.json.bak before any rewrite.
+		if err := autopilot.SyncManagedPi(cfg); err != nil {
+			log.Fatal(err)
+		}
+		out, err := autopilot.ManagedDoctor(ctx, cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Managed Pi installation synced.")
 		fmt.Println(strings.TrimSpace(out))
 	case "run":
 		if token == "" {
