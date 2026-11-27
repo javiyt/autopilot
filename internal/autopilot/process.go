@@ -101,6 +101,11 @@ func truncate(s string, max int) string {
 
 var memoryErrors = regexp.MustCompile(`(?i)(out.of.memory|\boom\b|memory pressure|cannot allocate memory|metal allocation|kv.cache|context.length|context.window|context.size|too.many.tokens|maximum.context|token.limit|failed.to.compact|compaction.failed|prefill.guard|exceeds.*context|length.*exceeded)`)
 
+// ClassifyFailure inspects failure text and returns a failure kind. This
+// regex is the seam to extend when a new Pi/provider error signature for a
+// real connection or memory failure appears: unknown text classifies as
+// "execution", which keeps today's retry→block behavior (a stage can fail
+// but cannot stall forever).
 func ClassifyFailure(s string) string {
 	if memoryErrors.MatchString(s) {
 		return "memory/context"
@@ -108,7 +113,7 @@ func ClassifyFailure(s string) string {
 	if strings.Contains(strings.ToLower(s), "signal: killed") {
 		return "process-killed (possible OOM)"
 	}
-	transient := regexp.MustCompile(`(?i)(timeout|timed.out|fetch.failed|ECONNREFUSED|EHOSTUNREACH|ECONNRESET|connection.reset|503|502|504|429|overloaded|socket.hang.up)`)
+	transient := regexp.MustCompile(`(?i)(timeout|timed.out|fetch.failed|ECONNREFUSED|EHOSTUNREACH|ECONNRESET|connection.reset|connection.refused|503|502|504|429|overloaded|socket.hang.up)`)
 	if transient.MatchString(s) {
 		return "connection/transient"
 	}
