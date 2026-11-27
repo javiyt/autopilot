@@ -211,6 +211,40 @@ models:
     id: qwen2.5:7b
     thinking: low
 
+# ======================= WEB SEARCH (OPTIONAL, DEFAULT OFF) =======================
+#
+# Pinned web-search extension for read-only stage sessions. Absent or
+# enabled: false = today's behavior exactly (no -e anywhere, --no-extensions
+# in every session).
+#
+# When enabled:
+#   - `extension` must be an immutable pin: npm:<package>@<x.y.z> (exact
+#     version, never @latest/ranges) or git:<repo>@<40-char commit>.
+#   - `sha256` is the supervisor-verified hash of the installed extension
+#     content; a mismatch fails closed and purges the managed install.
+#   - `allowed_roles` may only name read-only roles (investigate, plan,
+#     verify, triage, chat); implement and review are rejected at config load.
+#   - Allowed roles get ONE explicit -e path under the managed agent dir plus
+#     the extension's `web_search` tool in the --tools allowlist; every other
+#     role keeps today's exact argv. Sessions label search results as
+#     untrusted data via --append-system-prompt.
+#   - The backend URL/key/timeout reach the extension as PI_AUTOPILOT_WEBSEARCH_*
+#     child environment entries. api_key: "${SEARXNG_API_KEY}" (env reference,
+#     preferred) or a literal (injected only as PI_AUTOPILOT_WEBSEARCH_KEY_<BACKEND>).
+#   - Initial install needs the npm registry (or git) once; the extension is
+#     installed under the managed agent dir (state_dir) — global ~/.pi is
+#     untouched. Verify with: ./pi-autopilot doctor
+#
+# web_search:
+#   enabled: false
+#   extension: "npm:@trusted/pi-websearch@1.2.3"
+#   sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#   allowed_roles: [investigate, plan]
+#   backend: searxng
+#   backend_url: http://searxng:8080
+#   api_key: "${SEARXNG_API_KEY}"
+#   timeout_seconds: 120
+
 # ======================= ALLOWED MODELS LIST (Telegram) =======================
 #
 # List of models that can be changed via Telegram (/use <role> <model>)

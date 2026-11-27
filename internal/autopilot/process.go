@@ -228,12 +228,31 @@ func RunPi(parent context.Context, cfg Config, cwd, role, provider, model, think
 	defer cancel()
 	// Disable globally installed extensions/MCP to avoid plan-mode state bleed and
 	// unexpected write-capable tools in the read-only reviewer/chat sessions.
-	args := []string{"--mode", "json", "--no-session", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--provider", provider, "--model", model, "--thinking", thinking}
-	if readOnly {
-		args = append(args, "--tools", "read,grep,find,ls")
-	} else {
-		args = append(args, "--tools", "read,grep,find,ls,bash,edit,write")
+	// --no-approve: never honor trust-gated project-local config from an
+	// untrusted worktree (defense in depth for every session).
+	args := []string{"--mode", "json", "--no-session", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-approve", "--provider", provider, "--model", model, "--thinking", thinking}
+	// Tool allowlist: builtins only, plus exactly one extension tool for
+	// allowlisted web-search roles (issue #7). A plain --tools list replaces
+	// the whole selection, so extra tools a loaded extension registers are
+	// never declared to the model.
+	tools := "read,grep,find,ls"
+	if !readOnly {
+		tools = "read,grep,find,ls,bash,edit,write"
 	}
+	if cfg.WebSearchRoleAllowed(role) {
+		// Fail closed: the pinned extension must be installed and hash-
+		// verified before the session starts (runStageIn pre-flight re-syncs
+		// it). Never silently degrade an allowlisted role to extension-free.
+		entry, err := webSearchEntry(cfg)
+		if err != nil {
+			result.Err = fmt.Errorf("web search extension unavailable for role %s: %w", role, err)
+			result.FailureKind = "execution"
+			return result
+		}
+		tools += "," + webSearchToolName
+		args = append(args, "-e", entry, "--append-system-prompt", webSearchUntrustedDirective)
+	}
+	args = append(args, "--tools", tools)
 	args = append(args, "--", prompt)
 	log.Printf("Pi session starting: role=%s provider=%s model=%s thinking=%s (log: %s)", role, provider, model, thinking, logPath)
 	c := exec.CommandContext(ctx, "pi", args...)

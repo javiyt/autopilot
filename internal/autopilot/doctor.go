@@ -2,7 +2,9 @@ package autopilot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -79,6 +81,30 @@ func ManagedDoctor(parent context.Context, cfg Config) (string, error) {
 	// Key sources only: the key value itself must never be printed here.
 	for _, key := range keys {
 		lines = append(lines, "provider "+key+" key source: "+creds[key].Source)
+	}
+	// Web-search extension state (issue #7): SyncManagedPi above already
+	// synced the managed install; report the pinned source, the verified
+	// hash state and the key *source* only — never the key value (AC-3).
+	ws := cfg.WebSearch
+	if !ws.Enabled {
+		lines = append(lines, "web search: disabled")
+	} else {
+		manifestPath, entryDir := webSearchPaths(cfg)
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return "", fmt.Errorf("web search extension manifest missing (%s): re-run setup with the pinned source and sha256", manifestPath)
+		}
+		var m webSearchManifest
+		if err := json.Unmarshal(data, &m); err != nil || m.Source != ws.Extension || m.SHA256 != ws.SHA256 {
+			return "", fmt.Errorf("web search extension manifest is stale or unreadable: re-run setup with the pinned source and sha256")
+		}
+		h, err := hashDir(entryDir)
+		if err != nil || h != ws.SHA256 {
+			return "", fmt.Errorf("web search extension content no longer matches the configured sha256: re-run setup")
+		}
+		lines = append(lines, "web search: enabled (source: "+ws.Extension+")")
+		lines = append(lines, "web search extension: verified (sha256 "+h[:12]+"...)")
+		lines = append(lines, "web search key source: "+webSearchKeySource(cfg))
 	}
 	// Live remote endpoint/model check (issue #5): unreachable or
 	// auth-failed remote endpoints are a hard doctor failure so the operator

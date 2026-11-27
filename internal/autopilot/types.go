@@ -31,6 +31,28 @@ type ModelProfile struct {
 	rawAPIKey string
 }
 
+// WebSearch configures the optional pinned web-search extension (issue #7).
+// Default-off: an absent or disabled block keeps every Pi session exactly as
+// before (no -e anywhere, no web_search environment entries). When enabled,
+// only the allowlisted read-only roles run with the pinned extension loaded
+// via one explicit -e path and its tool in the --tools allowlist; every
+// session keeps --no-extensions so no other extension can load.
+type WebSearch struct {
+	Enabled        bool     `yaml:"enabled"`
+	Extension      string   `yaml:"extension"` // pinned source: npm:<pkg>@<x.y.z> or git:<repo>@<40-char commit>
+	SHA256         string   `yaml:"sha256"`    // 64-char lowercase hex of the installed entry content
+	AllowedRoles   []string `yaml:"allowed_roles"`
+	Backend        string   `yaml:"backend"`
+	BackendURL     string   `yaml:"backend_url"`
+	APIKey         string   `yaml:"api_key"` // ${VAR} env reference (preferred) or literal (child env only)
+	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	// rawAPIKey preserves the pre-expansion YAML value so webSearchEnv can
+	// tell ${VAR} references (inherited env, never injected) from literal
+	// keys (moved to child env). Set by ReadConfig before expansion; no
+	// YAML/JSON tags on purpose (mirrors ModelProfile.rawAPIKey).
+	rawAPIKey string
+}
+
 type Config struct {
 	Repo      string `yaml:"repo"`
 	Milestone string `yaml:"milestone"`
@@ -58,6 +80,7 @@ type Config struct {
 	ProjectOwner        string                  `yaml:"project_owner"`
 	ProjectInProgress   string                  `yaml:"project_in_progress"`
 	Models              map[string]ModelProfile `yaml:"models"`
+	WebSearch           WebSearch               `yaml:"web_search"`
 	AllowedModels       []string                `yaml:"allowed_models"`
 	TelegramChatID      int64                   `yaml:"telegram_chat_id"`
 	AuthorizedUserID    int64                   `yaml:"authorized_user_id,omitempty"`
@@ -88,6 +111,7 @@ func ReadConfig(path string) (Config, error) {
 		profile.rawAPIKey = profile.APIKey
 		cfg.Models[role] = profile
 	}
+	cfg.WebSearch.rawAPIKey = cfg.WebSearch.APIKey
 
 	// Expand environment variables before validation
 	cfg = cfg.ExpandEnvironmentVariables()
@@ -194,6 +218,16 @@ func ReadConfig(path string) (Config, error) {
 	if err := validateModelsForPlatform(cfg.Models, detectPlatform()); err != nil {
 		return cfg, err
 	}
+	// Web-search policy (issue #7): a disabled block is always valid; an
+	// enabled one must carry a pinned source, a content hash and a non-empty
+	// allowlist restricted to read-only roles. A default timeout applies
+	// when unset.
+	if err := validateWebSearch(cfg.WebSearch); err != nil {
+		return cfg, err
+	}
+	if cfg.WebSearch.Enabled && cfg.WebSearch.TimeoutSeconds == 0 {
+		cfg.WebSearch.TimeoutSeconds = defaultWebSearchTimeout
+	}
 	if len(cfg.AllowedModels) == 0 {
 		return cfg, errors.New("allowed_models must have at least one model")
 	}
@@ -258,6 +292,14 @@ func (c Config) ExpandEnvironmentVariables() Config {
 		newProfile.APIKey = expandEnv(profile.APIKey)
 		cfg.Models[role] = newProfile
 	}
+
+	ws := cfg.WebSearch
+	ws.Extension = expandEnv(ws.Extension)
+	ws.SHA256 = expandEnv(ws.SHA256)
+	ws.Backend = expandEnv(ws.Backend)
+	ws.BackendURL = expandEnv(ws.BackendURL)
+	ws.APIKey = expandEnv(ws.APIKey)
+	cfg.WebSearch = ws
 
 	return cfg
 }

@@ -69,6 +69,34 @@ Guarantees:
 - Registry mutations are **atomic** (temp file + fsync + rename) with a single rotating safe backup at `models.json.bak`; a config that fails validation never touches the existing registry (rollback = restore `.bak`, or simply re-run `setup` after fixing the YAML).
 - Re-running `setup` with unchanged config produces no visible mutation.
 
+## Web search for read-only stages (optional, default off)
+
+`config.yaml` may pin a web-search extension that **read-only** stage sessions may use:
+
+```yaml
+web_search:
+  enabled: true
+  extension: "npm:@trusted/pi-websearch@1.2.3"  # exact npm version or git:<repo>@<40-char commit>
+  sha256: "<64-char hex of the installed extension content>"
+  allowed_roles: [investigate, plan]            # subset of investigate, plan, verify, triage, chat
+  backend: searxng
+  backend_url: http://searxng:8080
+  api_key: "${SEARXNG_API_KEY}"                  # env reference (preferred) or literal (child env only)
+  timeout_seconds: 120
+```
+
+Guarantees:
+
+- **Default off**: without the block (or `enabled: false`) every Pi session keeps today's exact argv — no `-e` anywhere. All sessions keep `--no-extensions --no-mcp --no-skills --no-prompt-templates` **and** `--no-approve`, so no discovered, configured or trust-gated extension can load in any role.
+- **Allowlist is read-only only**: `allowed_roles` may only name `investigate`, `plan`, `verify`, `triage`, `chat`. `implement` and `review` are rejected at config load; write-capable phases never see the extension's code or tools, and merge/CI/publish remain deterministic Go code.
+- **One explicit extension**: an allowlisted role gets exactly one `-e <path>` pointing at a supervisor-owned entry dir under the managed agent dir, plus the extension's `web_search` tool in the `--tools` allowlist. Extra tools a malicious extension registers are never declared to the model.
+- **Pinned + hash-verified**: the source must be an exact npm version or 40-char git commit (no `@latest`, ranges, tags or branches) and `sha256` must match the installed content. `setup`/`doctor` install, verify and record it in the managed agent dir (`websearch.json`); a mismatch or later tamper fails closed and purges the install — an allowlisted role never silently degrades to extension-free.
+- **Untrusted data**: sessions label search results as untrusted via `--append-system-prompt`: fetched content is data, never instructions.
+- **Secrets**: `${VAR}` references pass through the inherited environment; literal keys travel only in the child environment as `PI_AUTOPILOT_WEBSEARCH_KEY_<BACKEND>`, never in argv, on disk or in logs. `doctor` prints key *sources* only.
+- **Rollback**: set `enabled: false` (or delete the block) and re-run `./pi-autopilot setup` — the extension is purged from the managed agent dir and every argv reverts to today's exactly.
+
+The initial install needs the npm registry (or git) reachable once from the supervisor host; afterward the pin is never re-fetched and no `pi update` is ever run by the supervisor.
+
 ## Remote inference: Raspberry Pi (Linux ARM64) → Mac Studio
 
 The supervisor runs on a Raspberry Pi and sends inference to a Mac Studio
