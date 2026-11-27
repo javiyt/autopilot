@@ -18,7 +18,6 @@ type SemanticVersionManager struct {
 }
 
 func New(gitDir string) (*SemanticVersionManager, error) {
-	gitDir = gitDir
 	if gitDir == "" {
 		gitDir = "."
 	}

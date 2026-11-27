@@ -67,7 +67,7 @@ func main() {
 	fmt.Printf("\nNew version: %s\n", newVersion.String())
 
 	previousVersion := vm.GetPreviousVersion()
-	if previousVersion.Equal(semver.SemVer{0, 0, 0}) {
+	if previousVersion.Equal(semver.SemVer{}) {
 		fmt.Println("Bump type: initial release (no previous version)")
 	} else {
 		bumpType := "patch"
