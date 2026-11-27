@@ -240,8 +240,11 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 			return
 		}
 		if err := a.update(func(s *State) {
-			s.Phase = s.BlockedPhase
-			s.Attempts[s.Phase] = 0
+			reblocked := s.BlockedPhase
+			s.Phase = reblocked
+			s.BlockedPhase = ""
+			s.Attempts[reblocked] = 0
+			s.OOMCount = 0
 			s.Paused = false
 			s.ChatMode = false
 		}); err != nil {
@@ -265,9 +268,12 @@ func (a *App) HandleTelegram(ctx context.Context, userID int64, incoming string)
 			return
 		}
 		if err := a.update(func(s *State) {
+			reblocked := s.BlockedPhase
 			s.RecoveryPrompt = truncate(rest, 3800)
-			s.Phase = s.BlockedPhase
-			s.Attempts[s.Phase] = 0
+			s.Phase = reblocked
+			s.BlockedPhase = ""
+			s.Attempts[reblocked] = 0
+			s.OOMCount = 0
 			s.Paused, s.ChatMode = false, false
 		}); err != nil {
 			reply(err.Error())

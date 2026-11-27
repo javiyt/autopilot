@@ -121,6 +121,31 @@ Ollama for the model the plan was written for.
 - The key travels only to the user-declared endpoint and never to logs,
   `models.json`, argv, or Telegram output.
 
+### Outage behavior
+
+`doctor` is the *startup* gate; while the supervisor is *running*, a remote
+endpoint that dies mid-stage is an outage the supervisor waits out instead
+of burning the stage's code-fix retry counter:
+
+- The waiting state is persisted in `state.json` (`remote_outage_since`,
+  `remote_host` — host:port only, never a key — `remote_probe_count`,
+  `remote_backoff_until`, `remote_notified`, `remote_reminder_at`), so a
+  supervisor restart mid-outage resumes the episode without resetting the
+  backoff schedule or re-notifying.
+- The supervisor probes the remote endpoints with bounded exponential
+  backoff — 30 s, 1 m, 2 m, … capped at 60 min — and resumes the interrupted
+  stage automatically in a fresh Pi session when the endpoint returns.
+- Telegram is notified exactly once on the offline transition, once on the
+  online transition, and at most once per hour while the outage continues.
+- `/status` shows the waiting phase, the endpoint host, and the elapsed
+  outage.
+- Provider out-of-memory / context-limit failures are bounded in a separate
+  counter (`oom_count`, max 5) with their own backoff (2 m → 30 m) and a
+  distinct block message; they never consume the stage retry counter either.
+- Code-fix retries (`attempts`), loop/idle/`stopReason` failures, gate
+  errors, and rejected credentials keep their existing retry → block
+  behavior.
+
 ## Linux Installation
 
 ### Requirements

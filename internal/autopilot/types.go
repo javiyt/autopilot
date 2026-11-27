@@ -508,10 +508,23 @@ type State struct {
 	CIReruns             map[string]int `json:"ci_reruns,omitempty"`
 	CIRerunAt            time.Time      `json:"ci_rerun_at,omitempty"`
 	Paused               bool           `json:"paused"`
-	ChatMode             bool           `json:"chat_mode"`
-	ChatHistory          []string       `json:"chat_history,omitempty"`
-	TelegramOffset       int64          `json:"telegram_offset"`
-	UpdatedAt            time.Time      `json:"updated_at"`
+	// Remote outage tracking (issue #6): persisted waiting state so a
+	// supervisor restart keeps the outage episode (original start, backoff
+	// schedule, notification dedup) alive across process restarts.
+	// Additive fields: old state files load with zero values, no migration.
+	RemoteOutageSince  time.Time `json:"remote_outage_since,omitempty"`
+	RemoteHost         string    `json:"remote_host,omitempty"` // host:port only — never a key
+	RemoteProbeCount   int       `json:"remote_probe_count,omitempty"`
+	RemoteBackoffUntil time.Time `json:"remote_backoff_until,omitempty"`
+	RemoteNotified     bool      `json:"remote_notified,omitempty"` // offline-transition dedup flag
+	RemoteReminderAt   time.Time `json:"remote_reminder_at,omitempty"`
+	// OOMCount is the separate bounded counter for provider OOM/context
+	// failures (issue #6): distinct from Attempts, which counts code-fix retries.
+	OOMCount       int       `json:"oom_count,omitempty"`
+	ChatMode       bool      `json:"chat_mode"`
+	ChatHistory    []string  `json:"chat_history,omitempty"`
+	TelegramOffset int64     `json:"telegram_offset"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func DefaultState(cfg Config) State {

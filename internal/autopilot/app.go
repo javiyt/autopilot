@@ -2,6 +2,7 @@ package autopilot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -215,6 +216,14 @@ func (a *App) Status() string {
 	if s.LastError != "" {
 		status += "\nLast error: " + truncate(s.LastError, 500)
 	}
+	if !s.RemoteOutageSince.IsZero() {
+		status += fmt.Sprintf("\nRemote outage: %s offline since %s (probe %d; next probe by %s)",
+			s.RemoteHost, s.RemoteOutageSince.Format("2006-01-02 15:04 MST"), s.RemoteProbeCount,
+			s.RemoteBackoffUntil.Format("2006-01-02 15:04 MST"))
+	}
+	if s.OOMCount > 0 {
+		status += fmt.Sprintf("\nProvider OOM/context failures: %d/%d (separate from code-fix retries)", s.OOMCount, maxOOMRetries)
+	}
 	return status
 }
 
@@ -344,12 +353,9 @@ func (a *App) Work(ctx context.Context, once bool) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			a.fail(s.Phase, err)
-			delay := 5 * time.Second
-			if strings.Contains(err.Error(), "memory/context") || strings.Contains(err.Error(), "possible OOM") {
-				delay = time.Duration(20*a.snapshot().Attempts[s.Phase]) * time.Second
+			if err := a.handleStepFailure(ctx, s.Phase, err); err != nil {
+				return err
 			}
-			_ = wait(ctx, delay)
 			continue
 		}
 		if once && a.snapshot().Issue.Number == 0 {
@@ -370,10 +376,192 @@ func wait(ctx context.Context, duration time.Duration) error {
 	}
 }
 
+// stageError carries the remote pre-flight probe result alongside a stage
+// failure so ClassifyStageError can tell an unreachable endpoint (outage:
+// wait and probe) from a rejected credential (execution: operator acts).
+// Error/Unwrap keep the failure text and unwrapping behavior unchanged.
+type stageError struct {
+	err       error
+	preflight *RemoteCheckResult
+}
+
+func (e *stageError) Error() string { return e.err.Error() }
+func (e *stageError) Unwrap() error { return e.err }
+
+// preflightOf extracts the probe result a stageError carried, if any.
+func preflightOf(err error) *RemoteCheckResult {
+	var se *stageError
+	if errors.As(err, &se) {
+		return se.preflight
+	}
+	return nil
+}
+
+// handleStepFailure classifies a step failure and routes it to the matching
+// recovery path (issue #6):
+//   - remote-outage: persist the offline/waiting state, wait and probe with
+//     bounded backoff until the endpoint returns; never touch Attempts.
+//   - oom: separate bounded counter with its own backoff and block message;
+//     never touch Attempts.
+//   - execution: the existing fail() code-fix retry→block behavior, unchanged.
+//
+// A transient connection failure on a stage whose profile has no remote
+// endpoint (local provider hiccup, or a deterministic stage) keeps today's
+// plain retry: there is no remote endpoint to probe.
+func (a *App) handleStepFailure(ctx context.Context, phase string, err error) error {
+	preflight := preflightOf(err)
+	class := ClassifyStageError(err, preflight)
+	switch class {
+	case FailureRemoteOutage:
+		s := a.snapshot()
+		if preflight == nil && !probeableProfile(a.modelFor(s, phase)) {
+			a.fail(phase, err)
+			_ = wait(ctx, stageRetryDelay)
+			return nil
+		}
+		return a.waitOutage(ctx, phase, err)
+	case FailureOOM:
+		if delay := a.handleOOMFailure(phase, err); delay > 0 {
+			_ = wait(ctx, delay)
+		}
+		return nil
+	default:
+		a.fail(phase, err)
+		_ = wait(ctx, stageRetryDelay)
+		return nil
+	}
+}
+
+// handleOOMFailure records one provider OOM/context failure in the separate
+// OOMCount and returns the retry delay (0 once the phase is blocked). The
+// block message is distinct from the code-fix retry block: the operator
+// should lower provider load or pick a smaller model, then /retry.
+func (a *App) handleOOMFailure(phase string, err error) time.Duration {
+	_ = a.update(func(s *State) {
+		s.OOMCount++
+		s.LastError = truncate(err.Error(), 1800)
+		if s.OOMCount >= maxOOMRetries {
+			s.Phase, s.BlockedPhase = "blocked", phase
+		}
+	})
+	s := a.snapshot()
+	if s.Phase == "blocked" {
+		a.notify(fmt.Sprintf("⛔ Blocked on issue #%d, stage %s after %d provider memory/context failures (separate bounded counter; code-fix retries untouched).\n%s\n\nLower the provider load or pick a smaller model, then send /retry.",
+			s.Issue.Number, phase, s.OOMCount, truncate(err.Error(), 900)))
+		return 0
+	}
+	delay := oomBackoff(s.OOMCount)
+	a.notify(fmt.Sprintf("⚠️ Issue #%d: %s hit a provider memory/context limit (%d/%d); retrying in %s without consuming code-fix retries.\n%s",
+		s.Issue.Number, phase, s.OOMCount, maxOOMRetries, delay, truncate(err.Error(), 450)))
+	return delay
+}
+
+// waitOutage persists the offline/waiting state and probes the remote
+// endpoints with bounded exponential backoff until they report healthy
+// again (AC-2/AC-4). Telegram is notified exactly once on the offline
+// transition, once on the online transition, and at most once per hour as a
+// "still offline" reminder (AC-5). Stage retry counters are never touched
+// (AC-3); on recovery this returns and the Work loop re-runs the step,
+// which launches a fresh Pi session from the immutable handoff artifacts.
+// Persisted fields survive a supervisor restart: the episode start and the
+// backoff deadline are kept, never reset.
+func (a *App) waitOutage(ctx context.Context, phase string, err error) error {
+	host := a.outageHost(phase)
+	_ = a.update(func(s *State) {
+		s.LastError = truncate(err.Error(), 1800)
+		if s.RemoteHost == "" {
+			s.RemoteHost = host
+		}
+	})
+	for ctx.Err() == nil {
+		s := a.snapshot()
+		now := time.Now().UTC()
+		// Respect the persisted backoff deadline (after a restart it may
+		// already be set): sleep to it, never re-probe hot.
+		if !s.RemoteBackoffUntil.IsZero() && s.RemoteBackoffUntil.After(now) {
+			if err := wait(ctx, s.RemoteBackoffUntil.Sub(now)); err != nil {
+				return err
+			}
+		}
+		now = time.Now().UTC()
+		healthy := a.remoteEndpointsHealthy(ctx)
+		if host == "" {
+			host = s.RemoteHost
+		}
+		d := decideOutage(host, phase, s, healthy, s.RemoteProbeCount+1, now)
+		_ = a.update(func(st *State) {
+			if d.ResetOutage {
+				st.RemoteOutageSince = time.Time{}
+				st.RemoteHost = ""
+				st.RemoteProbeCount = 0
+				st.RemoteBackoffUntil = time.Time{}
+				st.RemoteNotified = false
+				st.RemoteReminderAt = time.Time{}
+			} else {
+				st.RemoteOutageSince = d.OutageSince
+				st.RemoteProbeCount = d.ProbeCount
+				st.RemoteBackoffUntil = d.BackoffUntil
+				st.RemoteNotified = d.Notified
+				st.RemoteReminderAt = d.ReminderAt
+			}
+		})
+		switch {
+		case d.NotifyOffline:
+			a.notify(d.OfflineMessage)
+		case d.NotifyOnline:
+			a.notify(d.OnlineMessage)
+		}
+		if d.NotifyReminder {
+			a.notify(d.ReminderMessage)
+		}
+		if d.ResetOutage {
+			return nil
+		}
+	}
+	return ctx.Err()
+}
+
+// remoteEndpointsHealthy probes every probeable endpoint in the config and
+// reports whether the recovery probe passed: no unreachable or auth-failed
+// result. A catalog miss (model-not-found) is tolerated, matching the stage
+// pre-flight semantics (only connect/auth errors hard-fail).
+func (a *App) remoteEndpointsHealthy(ctx context.Context) bool {
+	for _, res := range CheckRemoteEndpoints(ctx, nil, a.cfg) {
+		if res.Status == StatusUnreachable || res.Status == StatusAuthFailed {
+			return false
+		}
+	}
+	return true
+}
+
+// outageHost resolves the host:port shown in outage messages. State wins so
+// a restart keeps the same host; otherwise the failing stage's model profile
+// supplies it. host:port only — never a key value (repo invariant).
+func (a *App) outageHost(phase string) string {
+	s := a.snapshot()
+	if s.RemoteHost != "" {
+		return s.RemoteHost
+	}
+	if profile := a.modelFor(s, phase); profile.BaseURL != "" && profile.Provider != "ollama" {
+		return hostPortOf(profile.BaseURL)
+	}
+	return "the remote inference endpoint"
+}
+
 func (a *App) transition(phase string) error {
 	return a.update(func(s *State) {
 		s.Attempts[s.Phase] = 0
 		s.Phase, s.LastError, s.RecoveryPrompt = phase, "", ""
+		// A stage boundary ends any remote-outage episode the previous stage
+		// persisted (e.g. the supervisor crashed while waiting and the
+		// endpoint recovered before the restart): a stale episode must not
+		// bleed into the next stage's outage notifications or backoff.
+		s.RemoteOutageSince = time.Time{}
+		s.RemoteHost = ""
+		s.RemoteProbeCount = 0
+		s.RemoteBackoffUntil = time.Time{}
+		s.RemoteNotified = false
+		s.RemoteReminderAt = time.Time{}
 	})
 }
 
@@ -395,6 +583,15 @@ func (a *App) beginIssue(issue Issue, queue []int) error {
 		s.BaseBranch, s.ReviewedFingerprint, s.PublishedFingerprint, s.PublishedSHA = "", "", "", ""
 		s.CIStartedAt = time.Time{}
 		s.CIRerunAt = time.Time{}
+		// Per-issue remote-outage episode and OOM counter reset with every
+		// issue (issue #6): a new task starts with a clean outage state.
+		s.RemoteOutageSince = time.Time{}
+		s.RemoteHost = ""
+		s.RemoteProbeCount = 0
+		s.RemoteBackoffUntil = time.Time{}
+		s.RemoteNotified = false
+		s.RemoteReminderAt = time.Time{}
+		s.OOMCount = 0
 		s.MergePolicy = "manual"
 		if a.cfg.AutoMerge {
 			s.MergePolicy = "auto"
@@ -490,8 +687,8 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 	// the credential *before* launching Pi. A down remote endpoint must fail
 	// this stage with an actionable error, never silently substitute a local
 	// provider (Ollama) for the model the plan was written for.
-	if err := a.remotePreflight(ctx, role, profile); err != nil {
-		return PiResult{Err: err}, err
+	if err, preflight := a.remotePreflight(ctx, role, profile); err != nil {
+		return PiResult{Err: err}, &stageError{err: err, preflight: preflight}
 	}
 	session := time.Now().UTC().Format("20060102T150405.000000000")
 	sessionsDir := filepath.Join(a.cfg.StateDir, "sessions")
@@ -521,16 +718,19 @@ func (a *App) runStageIn(ctx context.Context, s State, role, prompt string, read
 // defaults are skipped so the pre-flight adds latency only where the
 // Raspberry→Mac Studio (or similar) topology actually exists. It hard-fails
 // on connect and auth errors only; a catalog miss is left to Pi/doctor.
-func (a *App) remotePreflight(ctx context.Context, role string, profile ModelProfile) error {
+// The probe result is returned (nil when no remote endpoint was probed) so
+// the stage failure can be classified: unreachable -> remote-outage (wait
+// and probe), auth-failed -> execution (credential does not self-heal).
+func (a *App) remotePreflight(ctx context.Context, role string, profile ModelProfile) (error, *RemoteCheckResult) {
 	if profile.BaseURL == "" || profile.Provider == "ollama" {
-		return nil
+		return nil, nil
 	}
 	var cfg Config
 	cfg.Models = map[string]ModelProfile{"preflight": profile}
 	for _, res := range CheckRemoteEndpoints(ctx, nil, cfg) {
 		if res.Status == StatusUnreachable || res.Status == StatusAuthFailed {
-			return fmt.Errorf("%s stage: remote endpoint %s: %s — not falling back to a local provider; fix the endpoint or its credential", role, hostPortOf(profile.BaseURL), res.Message)
+			return fmt.Errorf("%s stage: remote endpoint %s: %s — not falling back to a local provider; fix the endpoint or its credential", role, hostPortOf(profile.BaseURL), res.Message), &res
 		}
 	}
-	return nil
+	return nil, nil
 }
