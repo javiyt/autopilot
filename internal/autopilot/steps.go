@@ -258,6 +258,36 @@ func reviewDecision(report string) string {
 	return decision
 }
 
+// recoverReviewVerdict runs the short read-only pass that converts a
+// completed review analysis into the exact decision marker when the
+// reviewer's final reply omitted it. The same review model decides from
+// its own analysis; Go parses the marker strictly, so a non-compliant
+// recovery yields the usual stage retry rather than a prose verdict.
+func (a *App) recoverReviewVerdict(ctx context.Context, s State, issue Issue, analysis string) (PiResult, error) {
+	profile := a.modelFor(s, "review")
+	session := time.Now().UTC().Format("20060102T150405.000000000")
+	path := filepath.Join(a.artifact(issue.Number, "sessions"), "review-verdict-"+session+".jsonl")
+	prompt := "A completed independent review of issue " + strconv.Itoa(issue.Number) + " ended without the required decision line. Below is the reviewer's analysis. Decide from that analysis alone: APPROVE only when it establishes no blocking findings for the full diff; REQUEST_CHANGES when it lists findings to fix; BLOCKED when it cannot establish approval. Reply with EXACTLY ONE LINE of plain text and nothing else — all-caps, single space after the colon, no heading marker, no bold, no backticks, no punctuation or trailing text: DECISION: APPROVE / DECISION: REQUEST_CHANGES / DECISION: BLOCKED"
+	if s.RecoveryPrompt != "" {
+		prompt += "\nOperator note from after a previous failure (factor it into the verdict):\n" + s.RecoveryPrompt
+	}
+	prompt += "\nReviewer analysis:\n" + tailTruncate(analysis, 16000)
+	res := RunPi(ctx, a.cfg, a.checkout, "review", profile.Provider, profile.ID, profile.Thinking, prompt, path, true)
+	if res.Err != nil {
+		return res, fmt.Errorf("marker recovery pass failed: %w (log: %s)", res.Err, res.LogPath)
+	}
+	return res, nil
+}
+
+// tailTruncate keeps the final max bytes of text, marking the elided head.
+// The tail holds the reviewer's conclusion, which the verdict must follow.
+func tailTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return "[earlier analysis elided]\n" + s[len(s)-max:]
+}
+
 // The transition graph is intentionally fixed. Content from an issue, a PR or
 // a model's response cannot add edges, skip checks, or enable auto-merge.
 func (a *App) step(ctx context.Context, s State) error {
@@ -487,11 +517,29 @@ func (a *App) step(ctx context.Context, s State) error {
 		if err := a.storeArtifact(issue.Number, "diff.patch", diff); err != nil {
 			return err
 		}
-		review, err := a.runStage(ctx, s, "review", prompt, true)
+		reviewRes, err := a.runStageIn(ctx, s, "review", prompt, true, a.checkout)
 		if err != nil {
 			return err
 		}
-		switch reviewDecision(review) {
+		review := reviewRes.Text
+		verdict := reviewDecision(review)
+		if verdict == "" {
+			// The review completed without being truncated but its final
+			// reply lacks the exact marker line: recover the verdict from
+			// the model's own analysis instead of discarding the whole
+			// review. The recovery run must still emit the exact marker;
+			// prose never becomes a verdict.
+			log.Printf("Issue #%d: review reply has no exact DECISION line; running marker recovery pass", issue.Number)
+			recovery, err := a.recoverReviewVerdict(ctx, s, issue, reviewRes.FullText)
+			if err != nil {
+				return err
+			}
+			verdict = reviewDecision(recovery.Text)
+			if verdict != "" {
+				review += "\n\n## Verdict (marker recovery)\n" + strings.TrimSpace(recovery.Text) + "\n"
+			}
+		}
+		switch verdict {
 		case "DECISION: APPROVE":
 			// The working tree must still match the material just examined.
 			after, err := a.diffFingerprint(ctx)

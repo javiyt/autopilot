@@ -185,6 +185,64 @@ func TestPiReportsFailureWithoutSettlement(t *testing.T) {
 	}
 }
 
+func TestPiLengthStopReasonFailsStage(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "pi")
+	// A final message cut off at the output token limit settles cleanly but
+	// is incomplete: the stage must fail instead of passing truncated output.
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"length","content":[{"type":"text","text":"partial analysis..."}]}}' '{"type":"agent_settled","aborted":false}'`
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := testConfig(dir)
+	res := RunPi(context.Background(), cfg, dir, "review", "omlx", "reviewer", "low", "test", filepath.Join(dir, "output.jsonl"), true)
+	if res.Err == nil {
+		t.Fatal("truncated final message must fail the stage")
+	}
+	if !strings.Contains(res.Err.Error(), "output token limit") {
+		t.Fatalf("error must name the truncation: %v", res.Err)
+	}
+}
+
+func TestPiAccumulatesFullTextAcrossTurns(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "pi")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"first turn analysis"}]}}' '{"type":"message_end","message":{"role":"toolResult","content":[{"type":"text","text":"tool output"}]}}' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final turn answer"}]}}' '{"type":"agent_settled","aborted":false}'`
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg := testConfig(dir)
+	res := RunPi(context.Background(), cfg, dir, "review", "omlx", "reviewer", "low", "test", filepath.Join(dir, "output.jsonl"), true)
+	if res.Err != nil {
+		t.Fatalf("session must succeed: %v", res.Err)
+	}
+	if res.Text != "final turn answer" {
+		t.Fatalf("Text = %q, want the final assistant message", res.Text)
+	}
+	want := "first turn analysis\nfinal turn answer\n"
+	if res.FullText != want {
+		t.Fatalf("FullText = %q, want %q", res.FullText, want)
+	}
+}
+
+func TestTailTruncate(t *testing.T) {
+	if got := tailTruncate("short", 10); got != "short" {
+		t.Fatalf("short text must pass through: %q", got)
+	}
+	long := strings.Repeat("a", 100)
+	got := tailTruncate(long, 10)
+	if !strings.HasPrefix(got, "[earlier analysis elided]\n") {
+		t.Fatalf("elided head must be marked: %q", got)
+	}
+	if !strings.HasSuffix(got, strings.Repeat("a", 10)) {
+		t.Fatalf("tail must be kept: %q", got)
+	}
+}
+
 func TestHandoffRecoversTransitionAndStartsNextSessionWithArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	checkout := filepath.Join(dir, "checkout")

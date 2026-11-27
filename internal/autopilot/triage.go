@@ -775,11 +775,11 @@ func (a *App) planTaskQueue(ctx context.Context, s State) ([]QueueIssue, []int, 
 func (a *App) planTaskQueueWithIssues(ctx context.Context, s State, issues []QueueIssue) ([]QueueIssue, []int, string, error) {
 	llmText := ""
 	if len(issues) > 0 && len(issues) <= triageLLMCap {
-		text, llmErr := a.runStageIn(ctx, s, "triage", TriagePrompt(issues), true, a.cfg.StateDir)
+		res, llmErr := a.runStageIn(ctx, s, "triage", TriagePrompt(issues), true, a.cfg.StateDir)
 		if llmErr != nil {
 			log.Printf("triage LLM call failed, using deterministic order: %s", llmErr)
 		} else {
-			llmText = text
+			llmText = res.Text
 		}
 	}
 	plan := PlanQueue(issues, llmText)
