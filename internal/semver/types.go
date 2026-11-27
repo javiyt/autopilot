@@ -21,6 +21,8 @@ func (v SemVer) String() string {
 // Parse parses a SemVer string.
 func Parse(s string) (SemVer, error) {
 	var v SemVer
+	// Strip optional "v" prefix
+	s = strings.TrimPrefix(s, "v")
 	parts := strings.Split(s, ".")
 	if len(parts) != 3 {
 		return v, &InvalidVersionError{s}
@@ -114,22 +116,27 @@ func ParseMessage(message string) *ConventionalCommit {
 		return nil
 	}
 
-	// Pattern: type(scope): subject or type: subject
-	pattern := regexp.MustCompile(`^[a-zA-Z]+(?:\([^)]+\))?:\s*(.*)$`)
+	// Pattern: type(scope): subject or type!: subject or type: subject
+	pattern := regexp.MustCompile(`^([a-zA-Z]+)(?:!)?(?:\([^)]+\))?\s*:\s*(.*)$`)
 	parts := pattern.FindStringSubmatch(msg)
-	
+
 	if len(parts) >= 2 {
 		commit.Type = strings.ToLower(parts[1])
+		// Strip breaking change marker from type
+		commit.Type = strings.TrimSuffix(commit.Type, "!")
 		subjectParts := strings.SplitN(msg, ":", 2)
 		commit.Subject = strings.TrimSpace(subjectParts[1])
+		// Check for BREAKING CHANGE footer
+		if strings.Contains(msg, "BREAKING CHANGE:") || strings.Contains(msg, "BREAKING-CHANGE:") {
+			commit.Breaking = true
+		}
+		// Check for ! breaking change marker in the message
+		if strings.Contains(msg, "!") && strings.HasPrefix(msg, commit.Type) {
+			commit.Breaking = true
+		}
 	} else {
 		commit.Type = "other"
 		commit.Subject = strings.TrimSpace(msg)
-	}
-
-	// Check for breaking change indicators
-	if strings.Contains(msg, "!") || strings.Contains(msg, "BREAKING CHANGE:") || strings.Contains(msg, "BREAKING-CHANGE:") {
-		commit.Breaking = true
 	}
 
 	// Check for footer

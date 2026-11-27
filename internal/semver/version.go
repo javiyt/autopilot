@@ -233,7 +233,7 @@ func GetCommitsSinceTag(gitDir string, sinceVersion string) ([]ConventionalCommi
 
 // getAllConventionalCommits retrieves all conventional commits in the repository.
 func getAllConventionalCommits(gitDir string) ([]ConventionalCommit, error) {
-	cmd := exec.Command("git", "log", "--all", "--pretty=format:%B")
+	cmd := exec.Command("git", "log", "--pretty=format:%s")
 	cmd.Dir = gitDir
 	output, err := cmd.Output()
 	if err != nil {
@@ -252,20 +252,17 @@ func parseCommitsFromOutput(output []byte) []ConventionalCommit {
 		return commits
 	}
 
-	lines := strings.Split(outputStr, "\n\n")
-	for _, section := range lines {
-		lines := strings.Split(section, "\n")
-		if len(lines) > 1 {
-			firstLine := strings.TrimSpace(lines[0])
-			if firstLine == "" {
-				continue
-			}
-		commit := ParseMessage(firstLine)
-		if commit != nil && commit.ConventionalCommits() {
+	// Parse all lines from the git log output
+	lines := strings.Split(strings.TrimSpace(outputStr), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-			if commit != nil && commit.ConventionalCommits() {
-				commits = append(commits, *commit)
-			}
+		// Only parse lines that look like conventional commit subjects
+		commit := ParseMessage(line)
+		if commit != nil && commit.ConventionalCommits() {
+			commits = append(commits, *commit)
 		}
 	}
 
