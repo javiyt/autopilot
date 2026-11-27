@@ -16,13 +16,14 @@ import (
 )
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|triage|status|doctor|discover-chat|service> -config /path/config.yaml [options]")
+	fmt.Fprintln(os.Stderr, "Usage: pi-autopilot <run|triage|status|doctor|discover-chat|service|bump> -config /path/config.yaml [options]")
 	fmt.Fprintln(os.Stderr, "  run: optional -once to process one issue then exit")
 	fmt.Fprintln(os.Stderr, "  triage: plan the issue queue once and print the order without executing")
 	fmt.Fprintln(os.Stderr, "  status: show durable state without contacting Pi or GitHub")
 	fmt.Fprintln(os.Stderr, "  doctor: check local binaries and registered Pi models")
 	fmt.Fprintln(os.Stderr, "  discover-chat: show Telegram chat IDs after sending /start to your bot")
 	fmt.Fprintln(os.Stderr, "  service <install|uninstall|start|stop|status>: manage the user-level system service (launchd or systemd user)")
+	fmt.Fprintln(os.Stderr, "  bump: bump SemVer version for new main commit")
 }
 
 func main() {
