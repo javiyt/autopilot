@@ -82,6 +82,57 @@ func TestVerifyCommandParser(t *testing.T) {
 	}
 }
 
+func TestSelectVerifyChecks(t *testing.T) {
+	// Model OK: its list is authoritative; a configured check it did not
+	// include (make check without a Makefile) is reported, not merged back.
+	checks, excluded := selectVerifyChecks(
+		[]string{"make check"},
+		[]string{"go mod tidy", "go test -race ./..."},
+		[]string{"go mod tidy", "go test -race ./...", "go vet ./..."},
+		true,
+	)
+	want := []string{"go mod tidy", "go test -race ./...", "go vet ./..."}
+	if len(checks) != len(want) || len(excluded) != 1 || excluded[0] != "make check" {
+		t.Fatalf("model path = checks %v excluded %v, want checks %v excluded [make check]", checks, excluded, want)
+	}
+	for i := range want {
+		if checks[i] != want[i] {
+			t.Fatalf("command %d = %q, want %q", i, checks[i], want[i])
+		}
+	}
+	// Model OK and kept the configured check: nothing excluded.
+	checks, excluded = selectVerifyChecks(
+		[]string{"make check"},
+		nil,
+		[]string{"make check", "go test ./..."},
+		true,
+	)
+	if len(checks) != 2 || excluded != nil {
+		t.Fatalf("kept-config path = checks %v excluded %v", checks, excluded)
+	}
+	// Model failed: deterministic fallback merges configured first, dedups.
+	checks, excluded = selectVerifyChecks(
+		[]string{"make check"},
+		[]string{"go test ./...", "make check"},
+		nil,
+		false,
+	)
+	want = []string{"make check", "go test ./..."}
+	if len(checks) != len(want) || excluded != nil {
+		t.Fatalf("fallback path = checks %v excluded %v, want %v", checks, excluded, want)
+	}
+	for i := range want {
+		if checks[i] != want[i] {
+			t.Fatalf("command %d = %q, want %q", i, checks[i], want[i])
+		}
+	}
+	// Model failed and both sources empty: no checks, nothing to fake.
+	checks, excluded = selectVerifyChecks(nil, nil, nil, false)
+	if len(checks) != 0 || excluded != nil {
+		t.Fatalf("empty path = checks %v excluded %v, want none", checks, excluded)
+	}
+}
+
 func TestElideLargeFileDiffs(t *testing.T) {
 	// No file markers at all: byte-for-byte passthrough.
 	noFiles := "hunks without diff --git headers"
