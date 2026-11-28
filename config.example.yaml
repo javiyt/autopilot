@@ -327,6 +327,11 @@ allowed_models:
 # Get this by running: ./pi-autopilot discover-chat
 telegram_chat_id: 0
 
+# Service secret file (issue #10): `pi-autopilot service install` writes the
+# bot token to <state_dir>/service-secrets.env (mode 0600), referenced by the
+# service unit — never inlined in the unit. Re-install rewrites only the token
+# line and preserves any other KEY=VALUE lines you add there.
+
 # ======================= OPTIONAL ENVIRONMENT VARIABLES =======================
 #
 # For external providers, use environment variables for API keys:

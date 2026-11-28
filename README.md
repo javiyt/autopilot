@@ -573,8 +573,11 @@ pi-autopilot service stop
 pi-autopilot service uninstall
 ```
 
-- **macOS**: writes `~/Library/LaunchAgents/com.javi.pi-autopilot.plist` (launchd: `RunAtLoad` + `KeepAlive`), captures the current `PATH` and the bot token in the unit, and logs to `state_dir/service-logs/`.
+- **Secret handling**: `service install` writes the bot token to an owner-only file, `state_dir/service-secrets.env` (mode `0600`), referenced by the unit — never inlined in the unit itself. macOS launches a sourcing wrapper (`state_dir/service-run.sh`, mode `0700`) that loads the file and exec's the binary; Linux uses a hard `EnvironmentFile=`. You may add other `KEY=VALUE` lines to that file (e.g. provider API keys) and re-install preserves them, rewriting only the token line. The same file is mount-friendly for Podman/containers.
+- **macOS**: writes `~/Library/LaunchAgents/com.javi.pi-autopilot.plist` (launchd: `RunAtLoad` + `KeepAlive`), carries only `PATH` in the unit, and logs to `state_dir/service-logs/`.
 - **Linux**: writes `~/.config/systemd/user/pi-autopilot.service` (`Restart=always`), enables it for your user session. For boot start without a login session run `loginctl enable-linger`.
+
+**Rotation**: if you installed an earlier build that inlined `PI_AUTOPILOT_TELEGRAM_TOKEN=` in the unit, treat that token as compromised — rotate it with BotFather, then re-run `service install` with the new token (it moves to the owner-only file and the unit is rewritten without it).
 
 Crashes and machine reboots are covered: the unit restarts the process and the supervisor resumes from `state.json`.
 

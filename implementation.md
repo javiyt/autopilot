@@ -1,74 +1,123 @@
-# Implementation — Issue #8: resolve local verification commands deterministically whenever possible
+# Implementation — Issue #10: owner-only secret handling for the system service
 
-Phase: **implement** (plan approved; no replan needed).
-Implemented on the issue branch; no `git commit`/`push` performed (Go owns those).
+Phase: **implement** (saved plan approved; no replan needed).
+Implemented on the issue branch `autopilot/issue-10`; no `git commit`/`push`
+performed (Go owns those). The pre-existing `implementation.md` in the worktree
+was stale content from issue #8 and has been replaced by this report.
 
 ## Verdict
 
 The saved plan is implemented in full. No replan: nothing in the verified
-evidence invalidated the plan. The one environment fact confirmed before
-coding — the repository has **no Makefile** — is handled by the plan's own
-rollout rule ("a make target while no Makefile exists" → resolver emits
-nothing, model path unchanged), not by a workaround or a new file.
+evidence invalidated the plan. Every listed local verification command passes
+(except `make check`, which the repository does not define — see Skipped).
+All four acceptance criteria are covered by new, platform-independent tests
+that run on the ubuntu CI runner for **both** unit templates with no `GOOS`
+skips.
 
-All acceptance criteria (AC-1…AC-6) are satisfied and covered by tests that
-pass under `go test -race ./...`.
+## Design (as planned)
+
+One portable, owner-only secret env file per installation, referenced by both
+native units and reusable for containers:
+
+- `<state_dir>/service-secrets.env` (mode `0600`, owner-only): holds
+  `PI_AUTOPILOT_TELEGRAM_TOKEN=<token>` plus any operator-added `KEY=VALUE`
+  lines.
+- **Linux systemd user unit**: drops the inline `Environment=` token line; uses a
+  hard `EnvironmentFile=<state_dir>/service-secrets.env` (no leading `-`, so a
+  missing file **fails closed**). Keeps `Environment=PATH=...`.
+- **macOS LaunchAgent**: launchd cannot `EnvironmentFile`, so the plist runs
+  `ProgramArguments = ["/bin/sh", "<state_dir>/service-run.sh"]`; the runner
+  (mode `0700`) does `set -a; . <env file>; exec <bin> run -config <cfgPath>`
+  with every interpolated path shell-quoted. The plist carries only `PATH` in
+  `EnvironmentVariables` — no secret.
+- **Container/Podman**: the same env-file + sourcing-wrapper model is
+  mount-friendly; documented, not code (repo has no Dockerfile).
+- **`service uninstall`** additionally removes `service-secrets.env` and
+  `service-run.sh` so no token lingers on disk after removal.
+- Re-install rewrites only the `PI_AUTOPILOT_TELEGRAM_TOKEN=` line; foreign
+  operator lines are preserved (idempotent, no data loss).
+
+No config schema change: `cfg.StateDir` is already guaranteed absolute by
+`ReadConfig`.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `internal/autopilot/checks.go` (new) | The deterministic core: `resolveDeterministicChecks`, `filterToAllowedRoots`, `redactSecrets`, `collectCheckSecrets`, and `runCheck` (bounded-timeout check runner returning output + exit code + timeout cause). Pure / filesystem-only, fully unit-testable. |
-| `internal/autopilot/checks_test.go` (new) | Resolver fixtures (Go, Node, Makefile, GitHub Actions, no-file escape valve, hostile target name), `TestFilterToAllowedRoots`, `TestRedactCheckLog`, `TestRunCheckEvidence`. |
-| `internal/autopilot/steps.go` | `selectVerifyChecks` now takes the four sources (configured, resolved, plan, model) and returns per-check `source` tags (`config`/`resolved`/`plan`/`verify`); plan checks are always allowlist-filtered (the asymmetry gap is closed). The `local_verify` phase resolves deterministically **first** and consults the verify model **only** when the resolver finds nothing; checks execute via `runCheck` with exit code / timeout evidence and redacted logs. |
-| `internal/autopilot/steps_test.go` | `TestSelectVerifyChecks` extended to the new 4-source signature with source-tag assertions; new `TestSelectVerifyChecksDeterministicFirst` (AC-1 no-LLM proof at the selection layer) and `TestPlanChecksFiltered` (untrusted plan data never runs). |
-| `internal/autopilot/workflow.go` | The investigate baseline now runs configured **plus** resolved checks (so the pre-implementation baseline covers exactly the set `local_verify` executes), uses `runCheck` for exit-code/timeout evidence, and redacts baseline logs. `BaselineCheck` keying unchanged. |
-| `internal/autopilot/app.go` | Added `telegramTokenOf` helper (returns the token value only for log redaction; never logged). |
-| `README.md` | `local_verify` stage row updated: deterministic resolution first, model only when no discoverable entrypoint; redaction note. |
-| `config.example.yaml` | `check_commands` and `verify` comments refreshed to the new precedence and the "model no longer re-decides a resolvable repo" behavior. |
+| `internal/autopilot/service.go` | Rewrote the token model. New pure renderers `renderSystemdUnit(bin, cfgPath, envFile, pathEnv, logsDir)`, `renderLaunchAgentPlist(cfgPath, runnerPath, pathEnv, logsDir)`, `renderServiceRunner(bin, cfgPath, envFile)` (all platform-parameterized, no `runtime.GOOS` inside → unit-testable on any host). New `writeServiceSecrets(stateDir, token)` with fail-closed validation. New files-only seam `installServiceFiles(cfg, token, goos)` (renders + writes secrets file, runner, unit; asserts permissions) — `ServiceInstall` = `installServiceFiles` + daemon start (`startLaunchAgent`/`startSystemdUser`). `ServiceUninstall(cfg)` now also removes the secrets file + runner under `state_dir`. Added `shellQuote` helper. |
+| `cmd/pi-autopilot/main.go` | `service install` fatal message updated (token → owner-only `state_dir/service-secrets.env`, not the unit). `service uninstall` now best-effort loads config (tolerating absence) and passes it to `ServiceUninstall` so the secret file + runner are removed. |
+| `internal/autopilot/service_test.go` (NEW) | The tests in the mapping below. |
+| `README.md` | "System service" bullets rewritten: secret file, re-install preservation, rotation advisory for pre-existing inline-token installs, Podman mount note. |
+| `.env.example` | Comment block: under a system service the token is read from `state_dir/service-secrets.env` (generated by install), not this export. |
+| `config.example.yaml` | Comment-only "Service secret file" note in the Telegram section. |
 
-## Acceptance criteria
+## Fail-closed validation (issue scope item)
 
-- **AC-1** (no LLM for resolvable repos): `local_verify` calls
-  `resolveDeterministicChecks` before the model; the model is invoked *only*
-  when the resolver returns `ok=false`. `TestSelectVerifyChecksDeterministicFirst`
-  proves the model-derived list is ignored when the resolver hit.
-- **AC-2** (deterministic dedupe + allowlist): `selectVerifyChecks` dedupes in
-  the stable order configured → resolved → plan → model; every executed check
-  passes `filterToAllowedRoots` (plan commands are filtered on every path).
-  `TestSelectVerifyChecks`, `TestFilterToAllowedRoots`, `TestPlanChecksFiltered`.
-- **AC-3** (bounded timeout, exit code, full redacted logs): `runCheck`
-  records the child exit code (124 on timeout, 125 on launch failure) and a
-  `timedOut` flag; `local_verify` and the baseline store the evidence with an
-  `exit code:` / `cause: timeout` line, redacted via `redactSecrets`.
-  `TestRunCheckEvidence`, `TestRedactCheckLog`.
-- **AC-4** (unknown/missing never green): an empty final list blocks the phase
-  (existing error retained and extended); a check whose entrypoint cannot run
-  is a FAIL (non-zero exit code); a baseline failure is a "baseline blocker",
-  and the baseline set now includes resolved checks so a resolved check that
-  failed pre-implementation is a baseline blocker, not a fresh rework.
-  `TestRunCheckEvidence/missing binary`, the `local_verify` empty-list branch.
-- **AC-5** (baseline, fingerprints, rework unchanged in semantics):
-  `local-fingerprint.txt`, diff fingerprint, rework transitions and
-  `MaxLocalFixes` accounting are untouched; `local-checks.md` records each
-  executed check's source (`config`/`resolved`/`plan`/`verify`).
-- **AC-6** (CI green): `go mod tidy`, `go test -race ./...`, `go vet ./...`
-  all pass with the new tests.
+Performed in `writeServiceSecrets` before any daemon start:
+
+1. Token must be non-empty and contain no CR/LF/whitespace (rejects broken
+   `.env` paste; today that would be silently inlined).
+2. If `service-secrets.env` pre-exists: `os.Stat` + `syscall.Stat_t` — mode
+   must be exactly `0600` and owner uid must match `os.Getuid()`; otherwise an
+   error names the exact `chmod 600`/`chown` remedy (never auto-rewrites a
+   stranger-owned or world-readable file). Fresh write uses `0600`, then
+   re-`stat` to assert (guards umask/overlay surprises).
+3. `service-run.sh` written `0700` and re-asserted; unit/plist file `0600`
+   (current behavior kept).
+4. Chat/user authorization: no new install-time gate beyond the existing
+   runtime authorization enforcement in `telegram.go`; a network `getMe` probe
+   is deliberately **not** added to install (offline guarantee preserved).
+
+## Acceptance criteria → tests (new `internal/autopilot/service_test.go`)
+
+Sentinel token: `SENTINEL-TELEGRAM-DO-NOT-LEAK`, mirroring
+`TestSyncManagedPiSecretSafety`.
+
+| # | AC | Implementation | Test |
+|---|---|---|---|
+| 1 | Unit files/templates do not contain literal tokens | Renderers emit no secret; only paths | `TestServiceUnitTemplatesExcludeToken` (render both, assert sentinel absent, `EnvironmentFile=`/runner + `PATH` present); `TestServiceInstallFilesSecretNotOnUnitPath` (linux+darwin, temp `HOME`, read back on-disk artifacts, assert sentinel absent from each, present only in the secret file). |
+| 2 | Service restart works without interactive entry | `EnvironmentFile` (hard) + wrapper `set -a; source` | `TestServiceRunnerInjectsToken` (execute generated `service-run.sh` under `sh` with a fake binary printing `$PI_AUTOPILOT_TELEGRAM_TOKEN`; assert token reaches the child + foreign lines propagate); `TestServiceRunnerShellQuotesSpacedPaths` (spaced `state_dir`, assert quoting + execute). Unit-level `EnvironmentFile`/`RunAtLoad`/`KeepAlive`/`Restart=always` asserted in renderer tests. |
+| 3 | Sensitive state files have appropriate permissions | `0600` secrets file, `0700` runner, `0600` unit, re-stat asserted | `TestServiceSecretsFileMode` (exact modes on every artifact, both templates); `TestServiceSecretsFileFailsClosedOnInsecurePreexisting` (pre-create `0644` → error naming the remedy, nothing rewritten); `TestServiceSecretsRejectsBadToken` (empty/whitespace rejected, no file created); `TestServiceStatTModeGuard` (covers the `syscall.Stat_t` mode/uid branch). |
+| 4 | Redaction/security regression tests pass | Token in env (never argv); uninstall removes secrets | `TestServiceUninstallRemovesSecretsFile` (install files-only, remove unit + secrets + runner, assert none remain and no token anywhere under the temp tree); `TestServiceSecretsPreserveForeignLines` (round-trip foreign lines incl. `=` in values); `TestShellQuote`. |
+
+All tests are platform-independent (pure renderers + the goos-parametrized
+files-only seam), so they run on the ubuntu CI runner for both templates with
+no `t.Skip` on `GOOS`.
+
+## Security notes
+
+- The token moves from "in the service definition (readable to anyone with fs
+  access to `~/.config/...` or `~/Library/LaunchAgents`)" to "owner-only file
+  with enforced `0600` + uid check".
+- Tokens previously inlined in already-installed units are treated as
+  compromised: README carries a rotation advisory for any pre-existing inline
+  `PI_AUTOPILOT_TELEGRAM_TOKEN=` install (re-run `service install` with the new
+  token moves it to the owner-only file and rewrites the unit without it).
+- Logs: the token enters the service process environment only; it is never in
+  `argv`, so process listings don't leak it. Existing check-log redaction
+  (`redactSecrets`/`collectCheckSecrets`, which already include the token) is
+  untouched and still covers artifacts. Service stdout/stderr logs live in
+  `state_dir/service-logs/` as today.
+- Git/release archives: no generated file containing a secret is placed under
+  the repo tree (all artifacts go to `state_dir`, untracked; `.gitignore`
+  already covers `/autopilot-state*/` and `/config.yaml`).
 
 ## Local verification commands run
 
-The task listed `make check` as a local verification command. **This repository
-defines no Makefile**, so `make check` cannot run; per the task instructions it
-was **not** satisfied by creating a Makefile or workaround. The repository's
-CI-equivalent checks (from `.github/workflows/test.yml`) were run instead:
+From the repository root, every listed command was run:
 
-- `go mod tidy` — **PASS**
-- `go test -race ./...` — **PASS** (all packages)
 - `go vet ./...` — **PASS**
+- `go test ./...` — **PASS** (all packages; `go test -race ./internal/autopilot/` also **PASS**)
+- `go build ./...` — **PASS**
+- `GOOS=linux GOARCH=amd64 go build -o /tmp/pi-autopilot-linux-amd64 ./cmd/pi-autopilot` — **PASS**
+- `GOOS=darwin GOARCH=arm64 go build -o /tmp/pi-autopilot-darwin-arm64 ./cmd/pi-autopilot` — **PASS**
+- `GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=ci" -o /tmp/pi-autopilot-linux-arm64 ./cmd/pi-autopilot` — **PASS**
+- `file /tmp/pi-autopilot-linux-arm64 | grep -q "ELF 64-bit" && ... | grep -Eq "ARM aarch64|AArch64"` — **PASS** (ELF ARM64 verified)
+- `go build -o bin/bump-version ./cmd/bump-version/` — **PASS**
 
-Skipped (entrypoint not defined in this repo): `make check`.
-
-The deterministic resolver (`resolveDeterministicChecks`) correctly detects this
-repository's Go entrypoints from `go.mod` (`go build ./...`, `go vet ./...`,
-`go test -race ./...`), mirroring the CI definition, and would fall back to the
-verify model only for a repository with no discoverable entrypoint.
+**Skipped:** `make check` — this repository defines **no Makefile**, so the
+command cannot run. Per the task instructions it was **not** satisfied by
+creating a Makefile or workaround; the repository's CI-equivalent checks from
+`.github/workflows/test.yml` (`go vet ./...`, `go test ./...`, `go build ./...`)
+were run instead and all pass. The cross-build + ELF + `bump-version` commands
+mirror jobs `cross`/`cross-arm64` and the `release.yml` build step.

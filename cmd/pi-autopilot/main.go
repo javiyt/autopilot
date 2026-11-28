@@ -109,7 +109,7 @@ func main() {
 		switch sub {
 		case "install":
 			if token == "" {
-				log.Fatal("PI_AUTOPILOT_TELEGRAM_TOKEN is required for service install; the unit stores it for unattended runs")
+				log.Fatal("PI_AUTOPILOT_TELEGRAM_TOKEN is required for service install; it is stored owner-only in state_dir/service-secrets.env for unattended runs")
 			}
 			absolutePath, err := filepath.Abs(*configPath)
 			if err != nil {
@@ -121,7 +121,14 @@ func main() {
 			}
 			out, err = autopilot.ServiceInstall(cfg, token)
 		case "uninstall":
-			out, err = autopilot.ServiceUninstall()
+			// Best-effort: load config so the owner-only secret file and runner
+			// under state_dir are also removed; absence of the config is fine
+				// (the fixed-path unit is still removed).
+			var cfg autopilot.Config
+			if absolutePath, err := filepath.Abs(*configPath); err == nil {
+				cfg, _ = autopilot.ReadConfig(absolutePath)
+			}
+			out, err = autopilot.ServiceUninstall(cfg)
 		case "start":
 			out, err = autopilot.ServiceStart()
 		case "stop":
