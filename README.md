@@ -593,6 +593,7 @@ The merge policy for an issue remains **immutable once started**. Changing confi
 - The `merge` stage re-verify PR, head SHA, review status, and CI
 - `ci_rerun_patterns` contains known CI infrastructure failure messages
 - If logs contain one of the patterns, the supervisor may execute `gh run rerun --failed` **once per run**
+- Unreported required status checks (a required check the PR head's CI never reports, e.g. a job renamed by a previous PR) are detected by comparing the base branch's ruleset required checks against the check runs reported for the head commit, after `required_check_grace_minutes` (default 5). Remediation is bounded: one `workflow_dispatch` trigger per dispatchable context (SHA-pinned), one ruleset rewrite per head SHA for stale contexts (stale names removed, head CI job names added, all other rules preserved verbatim), and a specific block naming the missing checks and the operator action otherwise. Disable with `required_check_auto_fix: false`
 - Code errors return to `implement`. Failed checks are not hidden
 - Never do `git reset --hard`, `git clean -fd`, force-push, remote branch deletion, or bypass protections
 - Local deletions are limited to supervisor **already-merged** branches confirmed with `git branch -d`

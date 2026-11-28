@@ -63,37 +63,50 @@ type Config struct {
 	PiAgentDir string `yaml:"pi_agent_dir"`
 	// Path is set by ReadConfig to the absolute configuration file location.
 	Path                string
-	PollSeconds         int                     `yaml:"poll_seconds"`
-	IdleTimeoutMinutes  int                     `yaml:"idle_timeout_minutes"`
-	StageTimeoutMinutes int                     `yaml:"stage_timeout_minutes"`
-	MaxStageRetries     int                     `yaml:"max_stage_retries"`
-	MaxReviewRounds     int                     `yaml:"max_review_rounds"`
-	MaxCIFixes          int                     `yaml:"max_ci_fixes"`
-	MaxLocalFixes       int                     `yaml:"max_local_fixes"`
-	MaxBaseSyncRounds   int                     `yaml:"max_base_sync_rounds"`
-	CIWaitMinutes       int                     `yaml:"ci_wait_minutes"`
-	AutoMerge           bool                    `yaml:"auto_merge"`
-	CheckCommand        string                  `yaml:"check_command"`
-	CheckCommands       []string                `yaml:"check_commands"`
+	PollSeconds         int      `yaml:"poll_seconds"`
+	IdleTimeoutMinutes  int      `yaml:"idle_timeout_minutes"`
+	StageTimeoutMinutes int      `yaml:"stage_timeout_minutes"`
+	MaxStageRetries     int      `yaml:"max_stage_retries"`
+	MaxReviewRounds     int      `yaml:"max_review_rounds"`
+	MaxCIFixes          int      `yaml:"max_ci_fixes"`
+	MaxLocalFixes       int      `yaml:"max_local_fixes"`
+	MaxBaseSyncRounds   int      `yaml:"max_base_sync_rounds"`
+	CIWaitMinutes       int      `yaml:"ci_wait_minutes"`
+	AutoMerge           bool     `yaml:"auto_merge"`
+	CheckCommand        string   `yaml:"check_command"`
+	CheckCommands       []string `yaml:"check_commands"`
 	// CheckArch is an optional parallel list to CheckCommands: element i is
 	// the architecture constraint ("any"/"amd64"/"arm64") of CheckCommands[i].
 	// Absent or shorter than CheckCommands means "any" for the rest, so an
 	// existing config with only check_commands parses unchanged. Each value is
 	// enum-validated at load time (safeTargetName-style guard): a bad value
 	// rejects the whole config rather than becoming a silent skip.
-	CheckArch         []string `yaml:"check_arch"`
-	RemoteChecks      RemoteChecks `yaml:"remote_checks"`
-	CIRerunPatterns     []string                `yaml:"ci_rerun_patterns"`
-	ProjectNumber       int                     `yaml:"project_number"`
-	ProjectOwner        string                  `yaml:"project_owner"`
-	ProjectInProgress   string                  `yaml:"project_in_progress"`
-	Models              map[string]ModelProfile `yaml:"models"`
-	WebSearch           WebSearch               `yaml:"web_search"`
-	AllowedModels       []string                `yaml:"allowed_models"`
-	TelegramChatID      int64                   `yaml:"telegram_chat_id"`
-	AuthorizedUserID    int64                   `yaml:"authorized_user_id,omitempty"`
-	ManualRepo          string                  `yaml:"manual_repo,omitempty"`
-	ManualMilestone     string                  `yaml:"manual_milestone,omitempty"`
+	CheckArch         []string                `yaml:"check_arch"`
+	RemoteChecks      RemoteChecks            `yaml:"remote_checks"`
+	CIRerunPatterns   []string                `yaml:"ci_rerun_patterns"`
+	ProjectNumber     int                     `yaml:"project_number"`
+	ProjectOwner      string                  `yaml:"project_owner"`
+	ProjectInProgress string                  `yaml:"project_in_progress"`
+	Models            map[string]ModelProfile `yaml:"models"`
+	WebSearch         WebSearch               `yaml:"web_search"`
+	AllowedModels     []string                `yaml:"allowed_models"`
+	TelegramChatID    int64                   `yaml:"telegram_chat_id"`
+	AuthorizedUserID  int64                   `yaml:"authorized_user_id,omitempty"`
+	ManualRepo        string                  `yaml:"manual_repo,omitempty"`
+	ManualMilestone   string                  `yaml:"manual_milestone,omitempty"`
+	// RequiredCheckGraceMinutes bounds how long unreported required checks
+	// (issue #42) may be tolerated after CI start before remediation acts.
+	RequiredCheckGraceMinutes int `yaml:"required_check_grace_minutes"`
+	// RequiredCheckAutoFix opts OUT of the automatic remediation of
+	// unreported required checks (one-shot workflow dispatch and one-shot
+	// ruleset rewrite, issue #42). Unset (nil) means enabled.
+	RequiredCheckAutoFix *bool `yaml:"required_check_auto_fix"`
+}
+
+// requiredCheckAutoFixEnabled reports whether issue #42 remediation (dispatch
+// and ruleset rewrite) is enabled: the config key opts out, unset means on.
+func (c Config) requiredCheckAutoFixEnabled() bool {
+	return c.RequiredCheckAutoFix == nil || *c.RequiredCheckAutoFix
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -230,6 +243,9 @@ func ReadConfig(path string) (Config, error) {
 	}
 	if cfg.CIWaitMinutes <= 0 {
 		cfg.CIWaitMinutes = 30
+	}
+	if cfg.RequiredCheckGraceMinutes <= 0 {
+		cfg.RequiredCheckGraceMinutes = 5
 	}
 	if len(cfg.CheckCommands) == 0 && strings.TrimSpace(cfg.CheckCommand) != "" {
 		cfg.CheckCommands = []string{cfg.CheckCommand}
@@ -646,7 +662,13 @@ type State struct {
 	StageRuns            map[string]int `json:"stage_runs,omitempty"`
 	CIReruns             map[string]int `json:"ci_reruns,omitempty"`
 	CIRerunAt            time.Time      `json:"ci_rerun_at,omitempty"`
-	Paused               bool           `json:"paused"`
+	// RequiredCheckDispatches records the required-check contexts already
+	// dispatched this issue run (issue #42: one dispatch per context).
+	RequiredCheckDispatches map[string]time.Time `json:"required_check_dispatches,omitempty"`
+	// RequiredCheckHealedForSHA records the PR head SHA for which the base
+	// ruleset rewrite already happened (issue #42: one rewrite per head).
+	RequiredCheckHealedForSHA string `json:"required_check_healed_for_sha,omitempty"`
+	Paused                    bool   `json:"paused"`
 	// Remote outage tracking (issue #6): persisted waiting state so a
 	// supervisor restart keeps the outage episode (original start, backoff
 	// schedule, notification dedup) alive across process restarts.
@@ -667,7 +689,7 @@ type State struct {
 }
 
 func DefaultState(cfg Config) State {
-	return State{Phase: "idle", Attempts: map[string]int{}, StageRuns: map[string]int{}, CIReruns: map[string]int{}, RoleModels: map[string]string{}, OverridesV2: true}
+	return State{Phase: "idle", Attempts: map[string]int{}, StageRuns: map[string]int{}, CIReruns: map[string]int{}, RequiredCheckDispatches: map[string]time.Time{}, RoleModels: map[string]string{}, OverridesV2: true}
 }
 
 func LoadState(path string, cfg Config) (State, error) {
@@ -693,6 +715,9 @@ func LoadState(path string, cfg Config) (State, error) {
 	}
 	if s.CIReruns == nil {
 		s.CIReruns = map[string]int{}
+	}
+	if s.RequiredCheckDispatches == nil {
+		s.RequiredCheckDispatches = map[string]time.Time{}
 	}
 	if s.Issue.Number > 0 && s.MergePolicy != "auto" && s.MergePolicy != "manual" {
 		return s, errors.New("saved run lacks an explicit immutable merge_policy; refuse to infer merge authority during upgrade")
