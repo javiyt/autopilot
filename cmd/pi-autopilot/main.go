@@ -36,7 +36,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  doctor: check local binaries and registered Pi models (--brief: PATH-only, no auth/endpoints/model)")
 	fmt.Fprintln(os.Stderr, "  setup: sync the managed (isolated) Pi installation from config.yaml and validate it")
 	fmt.Fprintln(os.Stderr, "  discover-chat: show Telegram chat IDs after sending /start to your bot")
-	fmt.Fprintln(os.Stderr, "  service <install|uninstall|start|stop|status>: manage the user-level system service (launchd or systemd user)")
+	fmt.Fprintln(os.Stderr, "  service <install|uninstall|start|stop|restart|status>: manage the user-level system service (launchd or systemd user); -dry-run renders everything without applying")
 	fmt.Fprintln(os.Stderr, "  bump: bump SemVer version for new main commit")
 	fmt.Fprintln(os.Stderr, "  version: print the version and GOOS/GOARCH (zero dependencies, no config)")
 }
@@ -52,6 +52,7 @@ func main() {
 	configPath := flags.String("config", "config.yaml", "YAML configuration")
 	once := flags.Bool("once", false, "Stop after the active issue is merged (run only)")
 	brief := flags.Bool("brief", false, "PATH-only diagnosis (doctor): platform + git/gh/pi presence; no auth, endpoints or model")
+	dryRun := flags.Bool("dry-run", false, "service install/uninstall: render and print all changes without applying them")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		log.Fatal(err)
 	}
@@ -119,7 +120,11 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			out, err = autopilot.ServiceInstall(cfg, token)
+			if *dryRun {
+				out, err = autopilot.ServiceInstallDryRun(cfg, token)
+			} else {
+				out, err = autopilot.ServiceInstall(cfg, token)
+			}
 		case "uninstall":
 			// Best-effort: load config so the owner-only secret file and runner
 			// under state_dir are also removed; absence of the config is fine
@@ -128,11 +133,17 @@ func main() {
 			if absolutePath, err := filepath.Abs(*configPath); err == nil {
 				cfg, _ = autopilot.ReadConfig(absolutePath)
 			}
-			out, err = autopilot.ServiceUninstall(cfg)
+			if *dryRun {
+				out, err = autopilot.ServiceUninstallDryRun(cfg)
+			} else {
+				out, err = autopilot.ServiceUninstall(cfg)
+			}
 		case "start":
 			out, err = autopilot.ServiceStart()
 		case "stop":
 			out, err = autopilot.ServiceStop()
+		case "restart":
+			out, err = autopilot.ServiceRestart()
 		case "status", "":
 			out, err = autopilot.ServiceStatus()
 		default:

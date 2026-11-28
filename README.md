@@ -567,15 +567,29 @@ The supervisor is designed to run unattended as a *user-level* system service: `
 ```bash
 export PI_AUTOPILOT_TELEGRAM_TOKEN='YOUR_BOT_TOKEN'
 
-pi-autopilot service install -config config.yaml   # write the unit and start it
+pi-autopilot service install -config config.yaml   # run pre-enable checks, write the unit, and start it
 pi-autopilot service status -config config.yaml
 pi-autopilot service stop
+pi-autopilot service restart
 pi-autopilot service uninstall
 ```
 
 - **Secret handling**: `service install` writes the bot token to an owner-only file, `state_dir/service-secrets.env` (mode `0600`), referenced by the unit — never inlined in the unit itself. macOS launches a sourcing wrapper (`state_dir/service-run.sh`, mode `0700`) that loads the file and exec's the binary; Linux uses a hard `EnvironmentFile=`. You may add other `KEY=VALUE` lines to that file (e.g. provider API keys) and re-install preserves them, rewriting only the token line. The same file is mount-friendly for Podman/containers.
 - **macOS**: writes `~/Library/LaunchAgents/com.javi.pi-autopilot.plist` (launchd: `RunAtLoad` + `KeepAlive`), carries only `PATH` in the unit, and logs to `state_dir/service-logs/`.
-- **Linux**: writes `~/.config/systemd/user/pi-autopilot.service` (`Restart=always`), enables it for your user session. For boot start without a login session run `loginctl enable-linger`.
+- **Linux**: writes `~/.config/systemd/user/pi-autopilot.service` (`Restart=always`), enables it for your user session, and restarts it so an upgrade picks up the new binary immediately. For boot start without a login session run `loginctl enable-linger`.
+- **Pre-enable checks**: `service install` runs the full `doctor` gate (git/gh/pi presence, `gh auth status`, managed Pi + models, key sources, remote endpoints) and fails closed before writing anything or enabling the unit. Fix the reported cause and re-run install.
+- **Idempotent & upgrade-safe**: re-running `service install` is safe — it does not erase `state.json`, worktrees, or your operator config, and it re-points the unit at the binary that is running now (bootout-before-bootstrap on macOS, unconditional `systemctl --user restart` on Linux).
+
+**Architecture & binary**: the unit always points at the *current* executable (`os.Executable()`), which is by definition built for the host architecture. Supported targets are `darwin/arm64`, `linux/arm64`, and `linux/amd64`; `pi-autopilot version` prints `GOOS/GOARCH` so you can confirm a build matches its host. The install output reports `platform: <os>/<arch>` and the resolved binary path. Release tags publish no per-arch binary artifacts, so for a different target build from source, e.g. `GOOS=linux GOARCH=arm64 go build -o pi-autopilot ./cmd/pi-autopilot`, then run that binary's `service install` on the target host.
+
+**Dry-run**: preview an install or removal without touching the filesystem or the daemon. Nothing is written and no secret value is printed — only rendered artifacts, paths, modes, and the daemon actions that would run.
+
+```bash
+pi-autopilot service install -config config.yaml -dry-run
+pi-autopilot service uninstall -dry-run
+```
+
+**Upgrade & rollback**: re-run `service install` from the other binary to re-point the unit. The secret file (`state_dir/service-secrets.env`), `state.json`, and worktrees are left byte-identical throughout; the unit is rewritten to reference the new executable and restarted. `service uninstall` is a full revert (unit + secret file + runner removed).
 
 **Rotation**: if you installed an earlier build that inlined `PI_AUTOPILOT_TELEGRAM_TOKEN=` in the unit, treat that token as compromised — rotate it with BotFather, then re-run `service install` with the new token (it moves to the owner-only file and the unit is rewritten without it).
 
