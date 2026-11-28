@@ -110,6 +110,23 @@ check_commands:
 ci_rerun_patterns:
   - "The job was not started because"
 
+# Unreported required status checks (issue #42): a required check on the base
+# branch that the PR head's CI never reports (renamed job, stale ruleset
+# entry) keeps the merge gate BLOCKED while `gh pr checks` reads green.
+# After this grace window (minutes, from CI start) the supervisor acts:
+#   - dispatchable gap (a head workflow with workflow_dispatch produces the
+#     check): one `gh run create <file> --ref <head-sha>` per context per run
+#   - stale gap (no workflow on the head produces the check): one rewrite of
+#     the base ruleset's required_status_checks per head SHA — stale contexts
+#     removed, job names of the head's pull_request CI added, all other rules
+#     preserved verbatim
+#   - unhealable gap: specific block with the missing names and the action
+required_check_grace_minutes: 5
+# Set to false to disable the automatic dispatch and ruleset rewrite;
+# unreported checks then block with a message naming the required operator
+# action. Unset (absent) means enabled.
+required_check_auto_fix: true
+
 # Optional GitHub Projects status update (leave blank to disable)
 project_number: 0
 project_owner: ""

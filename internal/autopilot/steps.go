@@ -757,6 +757,21 @@ func (a *App) step(ctx context.Context, s State) error {
 		if err := a.storeArtifact(issue.Number, "ci-current.md", report); err != nil {
 			return err
 		}
+		// Required status checks that never report (renamed jobs, stale
+		// ruleset entries, workflow_dispatch-only CI) are invisible to
+		// `gh pr checks`: without this pass the summary above reads green
+		// while the merge gate stays BLOCKED forever (issue #42).
+		if action, note, err := a.remediateUnreportedRequiredChecks(ctx, s, p); err != nil {
+			return err
+		} else if note != "" {
+			report += "\nRequired-check remediation: " + note + "\n"
+			if err := a.storeArtifact(issue.Number, "ci-current.md", report); err != nil {
+				return err
+			}
+			if action == remediationWaiting || action == remediationDispatched || action == remediationHealed {
+				return wait(ctx, time.Duration(a.cfg.PollSeconds)*time.Second)
+			}
+		}
 		if checks.Failed {
 			// A freshly requested rerun can still be reported as failed while
 			// GitHub updates check states. Give it a bounded status grace window.
@@ -864,6 +879,14 @@ func (a *App) step(ctx context.Context, s State) error {
 			}
 			a.notify(fmt.Sprintf("Issue #%d: base branch moved after publication; updated the PR branch and re-running verification (base sync %d/%d).", issue.Number, s.BaseSyncRounds+1, a.cfg.MaxBaseSyncRounds))
 			return a.transition("local_verify")
+		}
+		// The merge gate also goes BLOCKED while a required check has never
+		// reported; run the same bounded remediation here so a stuck merge
+		// self-heals instead of retrying a generic gate error (issue #42).
+		if action, note, err := a.remediateUnreportedRequiredChecks(ctx, s, p); err != nil {
+			return err
+		} else if note != "" && (action == remediationWaiting || action == remediationDispatched || action == remediationHealed) {
+			return wait(ctx, time.Duration(a.cfg.PollSeconds)*time.Second)
 		}
 		if p.ReviewDecision == "CHANGES_REQUESTED" || p.MergeStateStatus != "CLEAN" {
 			return fmt.Errorf("GitHub review/protection/merge gate not clear: review=%s merge=%s", p.ReviewDecision, p.MergeStateStatus)
