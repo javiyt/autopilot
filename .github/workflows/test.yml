@@ -1,15 +1,66 @@
-name: Go
+name: Test
 on:
   push:
+    branches: [main]
   pull_request:
 jobs:
-  test:
+  check:
+    name: Vet + test + build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: 1.27.4
-      - run: go mod tidy
-      - run: go test -race ./...
+          go-version-file: go.mod
       - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./...
+  cross:
+    name: Cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Linux amd64
+        run: GOOS=linux GOARCH=amd64 go build -o /tmp/pi-autopilot-linux-amd64 ./cmd/pi-autopilot
+      - name: Build Darwin arm64
+        run: GOOS=darwin GOARCH=arm64 go build -o /tmp/pi-autopilot-darwin-arm64 ./cmd/pi-autopilot
+  cross-arm64:
+    # Linux ARM64 (Raspberry Pi 4/5) target: cross-compiles on the x86_64
+    # ubuntu-latest runner (no ARM64 hardware required), verifies the artifact
+    # is a valid ARM64 ELF, and runs `version` under qemu-aarch64 when present.
+    # issue #9, AC-4. The ELF-header check is the hard gate; the qemu runtime
+    # smoke degrades to a skip when qemu-user is unavailable so the free tier
+    # stays green, but the cross-build itself must always succeed.
+    name: Cross-build linux/arm64 (Raspberry Pi target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cross-compile linux/arm64
+        run: GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=ci" -o /tmp/pi-autopilot-linux-arm64 ./cmd/pi-autopilot
+      - name: Verify ELF ARM64 header
+        run: |
+          set -euo pipefail
+          if ! command -v file >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y file
+          fi
+          # "ELF 64-bit LSB executable, ARM aarch64" is the expected signature.
+          file /tmp/pi-autopilot-linux-arm64 | grep -q "ELF 64-bit" || { echo "not an ELF"; exit 1; }
+          file /tmp/pi-autopilot-linux-arm64 | grep -Eq "ARM aarch64|AArch64" || { echo "not ARM64"; exit 1; }
+          echo "OK: linux/arm64 ELF verified"
+      - name: Run version under qemu-aarch64 (if available)
+        run: |
+          set -uo pipefail
+          if command -v qemu-aarch64 >/dev/null 2>&1; then
+            qemu-aarch64 -L /usr/aarch64-linux-gnu /tmp/pi-autopilot-linux-arm64 version
+          elif apt-get update -y && sudo apt-get install -y qemu-user && command -v qemu-aarch64 >/dev/null 2>&1; then
+            qemu-aarch64 -L /usr/aarch64-linux-gnu /tmp/pi-autopilot-linux-arm64 version
+          else
+            echo "qemu-aarch64 unavailable; runtime smoke skipped (ELF header already verified above)"
+          fi

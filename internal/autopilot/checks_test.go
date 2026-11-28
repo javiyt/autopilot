@@ -236,3 +236,49 @@ func TestRunCheckEvidence(t *testing.T) {
 		}
 	})
 }
+
+// TestCheckEvidenceRecordsCommit proves AC-2: the evidence for an executed (or
+// blocked) check records the exact HEAD SHA in a stable `commit:` field, so a
+// native or remote result stays bound to the exact commit. The cause field is
+// bounded (timeout / arch-mismatch) and absent for a clean result.
+func TestCheckEvidenceRecordsCommit(t *testing.T) {
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	started := "2026-01-01T00:00:00Z"
+	ended := "2026-01-01T00:00:05Z"
+
+	t.Run("executed pass records commit", func(t *testing.T) {
+		out := checkEvidence("go test ./...", "config", "any", commit, started, ended, 0, false, false, "")
+		if !strings.Contains(out, "commit: "+commit) {
+			t.Fatalf("evidence must record the exact commit; got:\n%s", out)
+		}
+		if !strings.Contains(out, "exit code: 0") {
+			t.Fatalf("evidence must record the exit code; got:\n%s", out)
+		}
+		if strings.Contains(out, "cause:") {
+			t.Fatalf("a clean result must not carry a cause; got:\n%s", out)
+		}
+		if !strings.Contains(out, "command: go test ./...") || !strings.Contains(out, "source: config") {
+			t.Fatalf("evidence must record command and source; got:\n%s", out)
+		}
+	})
+
+	t.Run("timeout records commit + bounded cause", func(t *testing.T) {
+		out := checkEvidence("make check", "config", "any", commit, started, ended, 124, true, false, "")
+		if !strings.Contains(out, "commit: "+commit) || !strings.Contains(out, "cause: timeout") {
+			t.Fatalf("timeout evidence must record commit + cause; got:\n%s", out)
+		}
+	})
+
+	t.Run("arch-blocked records commit + arch + arch-mismatch cause", func(t *testing.T) {
+		out := checkEvidence("make arm64-check", "config", "arm64", commit, started, ended, 125, false, true, "arch-mismatch")
+		if !strings.Contains(out, "commit: "+commit) || !strings.Contains(out, "arch: arm64") {
+			t.Fatalf("arch-blocked evidence must record commit + arch; got:\n%s", out)
+		}
+		if !strings.Contains(out, "cause: arch-mismatch") {
+			t.Fatalf("arch-blocked evidence must carry the arch-mismatch cause; got:\n%s", out)
+		}
+		if !strings.Contains(out, "exit code: 125") {
+			t.Fatalf("arch-blocked evidence must be non-zero (125); got:\n%s", out)
+		}
+	})
+}
