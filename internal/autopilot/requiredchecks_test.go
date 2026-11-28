@@ -102,52 +102,84 @@ func TestScanWorkflowProducersMissingDir(t *testing.T) {
 	}
 }
 
-func TestParseRulesetRequiredContexts(t *testing.T) {
-	// GitHub returns either {rulesets:[...]} or a bare array; both forms are
-	// handled. "target" is the branch name; only active rulesets targeting
-	// the base contribute; rule parameters may be null.
-	doc := `{"rulesets":[
-		{"id":1,"name":"main","target":"main","enforcement":"active",
-		 "rules":[
-		   {"type":"deletion","parameters":null},
-		   {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"},{"context":"Cross-build","integration_id":15368}]}},
-		   {"type":"pull_request","parameters":{"required_approving_review_count":0}}
-		 ]},
-		{"id":2,"name":"dev","target":"dev","enforcement":"active",
-		 "rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"dev-only"}]}}]},
-		{"id":3,"name":"draft","target":"main","enforcement":"evaluate",
-		 "rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"draft-only"}]}}]}
-	]}`
-	got, err := parseRulesetRequiredContexts([]byte(doc), "main")
-	if err != nil {
-		t.Fatal(err)
+func TestRulesetTargetsBranch(t *testing.T) {
+	// Classic shape: target is the branch name.
+	d := rulesetDoc{Target: "main"}
+	if !d.targetsBranch("main") || d.targetsBranch("dev") {
+		t.Fatalf("classic shape: %+v", d)
 	}
-	if want := []string{"Cross-build", "test"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("object form: got %v, want %v", got, want)
+	// Newer rules-API shape: target is the type, refs live in conditions.
+	v2 := rulesetDoc{
+		Target:     "branch",
+		Conditions: json.RawMessage(`{"ref_name":{"include":["refs/heads/main"],"exclude":[]}}`),
 	}
+	if !v2.targetsBranch("main") || v2.targetsBranch("dev") {
+		t.Fatalf("v2 include: %+v", v2)
+	}
+	// Exclusion wins over inclusion.
+	excl := rulesetDoc{
+		Target:     "branch",
+		Conditions: json.RawMessage(`{"ref_name":{"include":["refs/heads/*"],"exclude":["refs/heads/main"]}}`),
+	}
+	if excl.targetsBranch("main") {
+		t.Fatalf("excluded ref must not match: %+v", excl)
+	}
+	// Wildcard include matches any non-excluded branch.
+	wild := rulesetDoc{
+		Target:     "branch",
+		Conditions: json.RawMessage(`{"ref_name":{"include":["refs/heads/*"],"exclude":[]}}`),
+	}
+	if !wild.targetsBranch("dev") {
+		t.Fatalf("wildcard include should match other branches")
+	}
+	// A branch-typed ruleset without conditions matches nothing.
+	if (rulesetDoc{Target: "branch"}).targetsBranch("main") {
+		t.Fatal("branch target without conditions must not match")
+	}
+	// Tag targets never match a branch.
+	if (rulesetDoc{Target: "tag"}).targetsBranch("main") {
+		t.Fatal("tag target must not match a branch")
+	}
+	// Malformed conditions fail closed.
+	bad := rulesetDoc{Target: "branch", Conditions: json.RawMessage(`not json`)}
+	if bad.targetsBranch("main") {
+		t.Fatal("malformed conditions must not match")
+	}
+}
 
-	arrayForm := `[{
-		"id":1,"name":"main","target":"main","enforcement":"active",
-		"rules":[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"Go check"}]}}]
-	}]`
-	got, err = parseRulesetRequiredContexts([]byte(arrayForm), "main")
-	if err != nil {
-		t.Fatal(err)
+func TestRulesetRequiredStatusCheckContexts(t *testing.T) {
+	d := rulesetDoc{Rules: []json.RawMessage{
+		[]byte(`{"type":"deletion","parameters":null}`),
+		[]byte(`{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"do_not_enforce_on_create":true,"required_status_checks":[{"context":"test"},{"context":"Cross-build","integration_id":15368},{"context":""}]}}`),
+		[]byte(`{"type":"pull_request","parameters":{"required_approving_review_count":0}}`),
+	}}
+	want := []string{"Cross-build", "test"}
+	if got := d.requiredStatusCheckContexts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("contexts: got %v, want %v", got, want)
 	}
-	if want := []string{"Go check"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("array form: got %v, want %v", got, want)
+	if !d.hasRequiredStatusChecksRule() {
+		t.Fatal("hasRequiredStatusChecksRule must be true")
 	}
+	if (rulesetDoc{Rules: []json.RawMessage{[]byte(`{"type":"deletion"}`)}}).hasRequiredStatusChecksRule() {
+		t.Fatal("no required_status_checks rule present")
+	}
+}
 
-	// No active ruleset for the base branch: empty, no error.
-	got, err = parseRulesetRequiredContexts([]byte(doc), "release")
-	if err != nil {
-		t.Fatal(err)
+func TestParseRulesetList(t *testing.T) {
+	ids, err := parseRulesetList([]byte(`{"rulesets":[{"id":1},{"id":2}]}`))
+	if err != nil || !reflect.DeepEqual(ids, []int{1, 2}) {
+		t.Fatalf("object form: ids=%v err=%v", ids, err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("unrelated base: got %v, want empty", got)
+	ids, err = parseRulesetList([]byte(`[{"id":7}]`))
+	if err != nil || !reflect.DeepEqual(ids, []int{7}) {
+		t.Fatalf("array form: ids=%v err=%v", ids, err)
 	}
-
-	if _, err := parseRulesetRequiredContexts([]byte("not json"), "main"); err == nil {
+	// List entries without ids (other shapes) yield none, not an error.
+	ids, err = parseRulesetList([]byte(`[]`))
+	if err != nil || ids != nil {
+		t.Fatalf("empty list: ids=%v err=%v", ids, err)
+	}
+	if _, err := parseRulesetList([]byte("not json")); err == nil {
 		t.Fatal("want error for malformed JSON")
 	}
 }
@@ -232,7 +264,8 @@ func TestBuildRulesetRewritePayload(t *testing.T) {
 	doc := `{
 		"id": 42,
 		"name": "main",
-		"target": "main",
+		"target": "branch",
+		"conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
 		"enforcement": "active",
 		"bypass_mode": "admins_and_custom_props",
 		"bypass_actors": [{"actor_id": 7, "actor_type": "User", "actor_role": "Owner"}],
@@ -250,14 +283,15 @@ func TestBuildRulesetRewritePayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Name         string            `json:"name"`
-		Target       string            `json:"target"`
-		Enforcement  string            `json:"enforcement"`
-		BypassMode   string            `json:"bypass_mode"`
-		BypassActors []json.RawMessage `json:"bypass_actors"`
-		ID           *int              `json:"id"`
-		Source       *string           `json:"source"`
-		NodeID       *string           `json:"node_id"`
+		Name         string                 `json:"name"`
+		Target       string                 `json:"target"`
+		Enforcement  string                 `json:"enforcement"`
+		Conditions   map[string]interface{} `json:"conditions"`
+		BypassMode   string                 `json:"bypass_mode"`
+		BypassActors []json.RawMessage      `json:"bypass_actors"`
+		ID           *int                   `json:"id"`
+		Source       *string                `json:"source"`
+		NodeID       *string                `json:"node_id"`
 		Rules        []struct {
 			Type       string `json:"type"`
 			Parameters struct {
@@ -274,11 +308,14 @@ func TestBuildRulesetRewritePayload(t *testing.T) {
 	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatalf("payload not valid JSON: %v\n%s", err, payload)
 	}
-	if got.Name != "main" || got.Target != "main" || got.Enforcement != "active" {
+	if got.Name != "main" || got.Target != "branch" || got.Enforcement != "active" {
 		t.Errorf("identity not preserved: %+v", got)
 	}
 	if got.ID != nil || got.Source != nil || got.NodeID != nil {
 		t.Errorf("read-only fields must not be echoed back: id=%v source=%v node_id=%v", got.ID, got.Source, got.NodeID)
+	}
+	if ref := got.Conditions["ref_name"].(map[string]interface{}); ref["include"].([]interface{})[0] != "refs/heads/main" {
+		t.Errorf("conditions not preserved verbatim: %v", got.Conditions)
 	}
 	if len(got.BypassActors) != 1 {
 		t.Errorf("bypass_actors not preserved: %v", got.BypassActors)

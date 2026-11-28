@@ -135,58 +135,148 @@ func scanWorkflowProducers(checkout string) []workflowProducer {
 	return producers
 }
 
-// parseRulesetRequiredContexts extracts the required status check contexts
-// from a `gh api repos/{owner}/{repo}/rulesets` response. GitHub returns
-// either an object ({rulesets:[...]}) or a bare array; both forms are
-// handled. Only active repository rulesets whose target branch equals base
-// contribute; rule parameters may be null (e.g. deletion rules).
-func parseRulesetRequiredContexts(data []byte, base string) ([]string, error) {
-	var wrapper struct {
-		Rulesets []json.RawMessage `json:"rulesets"`
+// rulesetDoc is one repository ruleset document (`gh api repos/{repo}/rulesets/{id}`).
+// The REST API returns two shapes over time: the classic shape where
+// `target` is the branch name, and the newer rules-API shape where `target`
+// is the target type ("branch"/"tag") and the actual refs live in
+// conditions.ref_name. List entries contain neither conditions nor rules,
+// so branch matching happens on the full document fetched by id.
+type rulesetDoc struct {
+	ID           int               `json:"id"`
+	Name         string            `json:"name"`
+	Target       string            `json:"target"`
+	Enforcement  string            `json:"enforcement"`
+	Conditions   json.RawMessage   `json:"conditions"`
+	BypassMode   string            `json:"bypass_mode"`
+	BypassActors []json.RawMessage `json:"bypass_actors"`
+	Rules        []json.RawMessage `json:"rules"`
+}
+
+// targetsBranch reports whether this ruleset applies to the given base
+// branch in either API shape.
+func (d rulesetDoc) targetsBranch(base string) bool {
+	if base == "" {
+		return false
 	}
-	raw := [][]json.RawMessage{}
-	if err := json.Unmarshal(data, &wrapper); err == nil && len(wrapper.Rulesets) > 0 {
-		raw = append(raw, wrapper.Rulesets)
-	} else {
-		var arr []json.RawMessage
-		if err := json.Unmarshal(data, &arr); err != nil {
-			return nil, fmt.Errorf("unrecognized rulesets response shape: %w", err)
+	if d.Target == base {
+		return true
+	}
+	if d.Target != "branch" {
+		return false
+	}
+	var cond struct {
+		RefName struct {
+			Include []string `json:"include"`
+			Exclude []string `json:"exclude"`
+		} `json:"ref_name"`
+	}
+	if len(d.Conditions) == 0 {
+		return false
+	}
+	if err := json.Unmarshal(d.Conditions, &cond); err != nil {
+		return false
+	}
+	want := "refs/heads/" + base
+	included := false
+	for _, r := range cond.RefName.Include {
+		if refPatternMatches(r, want) {
+			included = true
 		}
-		raw = append(raw, arr)
 	}
+	if !included {
+		return false
+	}
+	for _, r := range cond.RefName.Exclude {
+		if refPatternMatches(r, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// refPatternMatches applies GitHub's ref_name condition matching: exact
+// match, or `*` wildcard patterns (e.g. refs/heads/*).
+func refPatternMatches(pattern, ref string) bool {
+	if !strings.Contains(pattern, "*") {
+		return pattern == ref
+	}
+	rx := "^" + strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*") + "$"
+	ok, err := regexp.MatchString(rx, ref)
+	return err == nil && ok
+}
+
+// requiredStatusCheckContexts extracts the required status check contexts
+// from this ruleset's rules; rule parameters may be null (deletion rules).
+func (d rulesetDoc) requiredStatusCheckContexts() []string {
 	var out []string
-	for _, r := range raw[0] {
-		var rs struct {
-			Target      string `json:"target"`
-			Enforcement string `json:"enforcement"`
-			Rules       []struct {
-				Type       string `json:"type"`
-				Parameters struct {
-					Required []struct {
-						Context string `json:"context"`
-					} `json:"required_status_checks"`
-				} `json:"parameters"`
-			} `json:"rules"`
+	for _, raw := range d.Rules {
+		var rule struct {
+			Type string `json:"type"`
+			Parameters struct {
+				Required []struct {
+					Context string `json:"context"`
+				} `json:"required_status_checks"`
+			} `json:"parameters"`
 		}
-		if err := json.Unmarshal(r, &rs); err != nil {
+		if err := json.Unmarshal(raw, &rule); err != nil {
 			continue
 		}
-		if rs.Target != base || rs.Enforcement != "active" {
+		if rule.Type != "required_status_checks" {
 			continue
 		}
-		for _, rule := range rs.Rules {
-			if rule.Type != "required_status_checks" {
-				continue
-			}
-			for _, c := range rule.Parameters.Required {
-				if c.Context != "" {
-					out = append(out, c.Context)
-				}
+		for _, c := range rule.Parameters.Required {
+			if c.Context != "" {
+				out = append(out, c.Context)
 			}
 		}
 	}
 	sort.Strings(out)
-	return out, nil
+	return out
+}
+
+// hasRequiredStatusChecksRule reports whether the ruleset carries a
+// required_status_checks rule at all (the rewrite is only eligible for such
+// rulesets).
+func (d rulesetDoc) hasRequiredStatusChecksRule() bool {
+	for _, raw := range d.Rules {
+		var rule struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &rule); err == nil && rule.Type == "required_status_checks" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRulesetList extracts the ruleset ids from a
+// `gh api repos/{repo}/rulesets` response; GitHub returns either an object
+// ({rulesets:[...]}) or a bare array. List entries carry no rules or
+// conditions, so callers must fetch each document by id for matching.
+func parseRulesetList(data []byte) ([]int, error) {
+	var wrapper struct {
+		Rulesets []struct {
+			ID int `json:"id"`
+		} `json:"rulesets"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err == nil {
+		var ids []int
+		for _, r := range wrapper.Rulesets {
+			ids = append(ids, r.ID)
+		}
+		return ids, nil
+	}
+	var arr []struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(data, &arr); err != nil {
+		return nil, fmt.Errorf("unrecognized rulesets response shape: %w", err)
+	}
+	var ids []int
+	for _, r := range arr {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }
 
 // parseProtectionRequiredContexts extracts the required check contexts from
@@ -296,19 +386,14 @@ func newRequiredCheckSet(required []string, reported map[string]bool, producers 
 
 // buildRulesetRewritePayload produces the PUT body for
 // `repos/{owner}/{repo}/rulesets/{id}` from the fetched ruleset document:
-// the same name, target, enforcement and bypass policy, with every rule
-// preserved verbatim except required_status_checks, whose
+// the same name, target, enforcement, conditions and bypass policy, with
+// every rule preserved verbatim except required_status_checks, whose
 // required_status_checks list is replaced by newContexts (each pinned to the
-// GitHub Actions integration id 15368).
+// GitHub Actions integration id 15368). Conditions are echoed verbatim
+// because the newer rules-API shape scopes the ruleset to refs through them;
+// omitting them could silently unscope the ruleset.
 func buildRulesetRewritePayload(doc []byte, newContexts []string) ([]byte, error) {
-	var rs struct {
-		Name         string            `json:"name"`
-		Target       string            `json:"target"`
-		Enforcement  string            `json:"enforcement"`
-		BypassMode   string            `json:"bypass_mode"`
-		BypassActors []json.RawMessage `json:"bypass_actors"`
-		Rules        []json.RawMessage `json:"rules"`
-	}
+	var rs rulesetDoc
 	if err := json.Unmarshal(doc, &rs); err != nil {
 		return nil, fmt.Errorf("unrecognized ruleset document: %w", err)
 	}
@@ -368,10 +453,11 @@ func buildRulesetRewritePayload(doc []byte, newContexts []string) ([]byte, error
 		Name         string            `json:"name"`
 		Target       string            `json:"target"`
 		Enforcement  string            `json:"enforcement"`
+		Conditions   json.RawMessage   `json:"conditions,omitempty"`
 		BypassMode   string            `json:"bypass_mode,omitempty"`
 		BypassActors []json.RawMessage `json:"bypass_actors,omitempty"`
 		Rules        []json.RawMessage `json:"rules"`
-	}{rs.Name, rs.Target, rs.Enforcement, rs.BypassMode, rs.BypassActors, rules}
+	}{rs.Name, rs.Target, rs.Enforcement, rs.Conditions, rs.BypassMode, rs.BypassActors, rules}
 	return json.Marshal(payload)
 }
 
@@ -469,23 +555,61 @@ func capGuidance(gaps []checkGap, dispatched map[string]bool) string {
 	return strings.Join(parts, "; ")
 }
 
+// fetchActiveBranchRulesets returns the active ruleset documents that target
+// the given base branch. List entries carry no rules or conditions in the
+// newer API shape, so each active id is fetched as a full document and
+// matched by branch (classic target-name shape or rules-API conditions
+// shape).
+func (a *App) fetchActiveBranchRulesets(ctx context.Context, base string) ([]rulesetDoc, error) {
+	listOut, err := command(ctx, a.checkout, "gh", "api", "repos/"+a.cfg.Repo+"/rulesets")
+	if err != nil {
+		return nil, err
+	}
+	ids, err := parseRulesetList([]byte(listOut))
+	if err != nil {
+		return nil, err
+	}
+	var docs []rulesetDoc
+	for _, id := range ids {
+		docOut, err := command(ctx, a.checkout, "gh", "api", fmt.Sprintf("repos/%s/rulesets/%d", a.cfg.Repo, id))
+		if err != nil {
+			continue
+		}
+		var d rulesetDoc
+		if err := json.Unmarshal([]byte(docOut), &d); err != nil {
+			continue
+		}
+		if d.Enforcement == "active" && d.targetsBranch(base) {
+			docs = append(docs, d)
+		}
+	}
+	return docs, nil
+}
+
 // requiredCheckContextsForBase returns the required status check contexts for
 // the base branch: active rulesets first, with classic branch protection as
 // the fallback for repositories that predate rulesets.
 func (a *App) requiredCheckContextsForBase(ctx context.Context, base string) ([]string, error) {
-	out, err := command(ctx, a.checkout, "gh", "api", "repos/"+a.cfg.Repo+"/rulesets")
+	docs, err := a.fetchActiveBranchRulesets(ctx, base)
 	if err != nil {
 		return nil, err
 	}
-	contexts, err := parseRulesetRequiredContexts([]byte(out), base)
-	if err != nil {
-		return nil, err
+	set := map[string]bool{}
+	for _, d := range docs {
+		for _, c := range d.requiredStatusCheckContexts() {
+			set[c] = true
+		}
 	}
-	if len(contexts) > 0 {
-		return contexts, nil
+	if len(set) > 0 {
+		var out []string
+		for c := range set {
+			out = append(out, c)
+		}
+		sort.Strings(out)
+		return out, nil
 	}
 	// No active ruleset requires checks: try classic branch protection.
-	out, err = command(ctx, a.checkout, "gh", "api", "repos/"+a.cfg.Repo+"/branches/"+base+"/protection")
+	out, err := command(ctx, a.checkout, "gh", "api", "repos/"+a.cfg.Repo+"/branches/"+base+"/protection")
 	if err != nil {
 		// 404 = branch not protected: legitimately no required checks.
 		if strings.Contains(err.Error(), "404") {
@@ -524,67 +648,38 @@ func (a *App) dispatchCheckWorkflow(ctx context.Context, file, ref string) error
 	return nil
 }
 
-// baseRulesetRef is one entry of the `gh api repos/{repo}/rulesets` list
-// (either the object's rulesets array or a bare array).
-type baseRulesetRef struct {
-	ID          int    `json:"id"`
-	Target      string `json:"target"`
-	Enforcement string `json:"enforcement"`
-}
+// baseRulesetRef is replaced by rulesetDoc: list entries carry no rules or
+// conditions, so the rewrite works on full documents fetched by id.
 
-// rewriteRequiredChecks rewrites the active base-branch ruleset's
-// required_status_checks to newContexts, preserving every other rule and the
-// bypass policy verbatim. It returns the previous context list. Only an
-// active branch ruleset with a required_status_checks rule is eligible.
+// rewriteRequiredChecks rewrites the base-branch ruleset's
+// required_status_checks to newContexts, preserving every other rule, the
+// ref conditions and the bypass policy verbatim. It returns the previous
+// context list. Eligible rulesets are the active ones targeting base with a
+// required_status_checks rule.
 func (a *App) rewriteRequiredChecks(ctx context.Context, base string, newContexts []string) ([]string, error) {
-	listOut, err := command(ctx, a.checkout, "gh", "api", "repos/"+a.cfg.Repo+"/rulesets")
+	docs, err := a.fetchActiveBranchRulesets(ctx, base)
 	if err != nil {
 		return nil, err
 	}
-	var refs []baseRulesetRef
-	var wrapper struct {
-		Rulesets []baseRulesetRef `json:"rulesets"`
-	}
-	if err := json.Unmarshal([]byte(listOut), &wrapper); err == nil {
-		refs = wrapper.Rulesets
-	} else if err := json.Unmarshal([]byte(listOut), &refs); err != nil {
-		return nil, fmt.Errorf("unrecognized rulesets list: %w", err)
-	}
-	var id int
-	found := false
-	for _, r := range refs {
-		if r.Target == base && r.Enforcement == "active" {
-			id = r.ID
-			found = true
+	docIdx := -1
+	for i := range docs {
+		if docs[i].hasRequiredStatusChecksRule() {
+			docIdx = i
 			break
 		}
 	}
-	if !found {
-		return nil, fmt.Errorf("no active ruleset targets branch %q; refusing to guess where required checks live", base)
+	if docIdx < 0 {
+		return nil, fmt.Errorf("no active ruleset targets branch %q with a required_status_checks rule; refusing to guess where required checks live", base)
 	}
-	docOut, err := command(ctx, a.checkout, "gh", "api", fmt.Sprintf("repos/%s/rulesets/%d", a.cfg.Repo, id))
+	d := docs[docIdx]
+	if d.ID <= 0 {
+		return nil, fmt.Errorf("ruleset document for branch %q is missing its id", base)
+	}
+	docOut, err := json.Marshal(d)
 	if err != nil {
 		return nil, err
 	}
-	var probe struct {
-		Rules []struct {
-			Type string `json:"type"`
-		} `json:"rules"`
-	}
-	if err := json.Unmarshal([]byte(docOut), &probe); err != nil {
-		return nil, fmt.Errorf("unrecognized ruleset document: %w", err)
-	}
-	sawRequired := false
-	for _, r := range probe.Rules {
-		if r.Type == "required_status_checks" {
-			sawRequired = true
-			break
-		}
-	}
-	if !sawRequired {
-		return nil, fmt.Errorf("ruleset %d has no required_status_checks rule; nothing to rewrite", id)
-	}
-	payload, err := buildRulesetRewritePayload([]byte(docOut), newContexts)
+	payload, err := buildRulesetRewritePayload(docOut, newContexts)
 	if err != nil {
 		return nil, err
 	}
@@ -598,8 +693,8 @@ func (a *App) rewriteRequiredChecks(ctx context.Context, base string, newContext
 		return nil, err
 	}
 	tmp.Close()
-	old, _ := a.requiredCheckContextsForBase(ctx, base)
-	if _, err := command(ctx, a.checkout, "gh", "api", "--method", "PUT", "--input", tmp.Name(), fmt.Sprintf("repos/%s/rulesets/%d", a.cfg.Repo, id)); err != nil {
+	old := d.requiredStatusCheckContexts()
+	if _, err := command(ctx, a.checkout, "gh", "api", "--method", "PUT", "--input", tmp.Name(), fmt.Sprintf("repos/%s/rulesets/%d", a.cfg.Repo, d.ID)); err != nil {
 		return nil, fmt.Errorf("ruleset update denied or failed: %w", err)
 	}
 	return old, nil
