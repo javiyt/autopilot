@@ -331,6 +331,7 @@ telegram_chat_id: 0
 # bot token to <state_dir>/service-secrets.env (mode 0600), referenced by the
 # service unit — never inlined in the unit. Re-install rewrites only the token
 # line and preserves any other KEY=VALUE lines you add there.
+# Preview an install without applying it: `pi-autopilot service install -dry-run`.
 
 # ======================= OPTIONAL ENVIRONMENT VARIABLES =======================
 #

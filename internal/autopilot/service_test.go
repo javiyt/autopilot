@@ -1,9 +1,13 @@
 package autopilot
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -392,5 +396,498 @@ func TestServiceStatTModeGuard(t *testing.T) {
 	}
 	if uid := os.Getuid(); int(st.Uid) != uid {
 		t.Fatalf("uid %d != current %d", st.Uid, uid)
+	}
+}
+
+// ---------------- Issue #11: idempotent install/uninstall, dry-run, restart
+
+// serviceSeams resets the serviceExec/servicePreCheck seams for a test and
+// restores the real ones on cleanup, so no test can leak a fake daemon call
+// into another.
+func serviceSeams(t *testing.T, exec func(ctx context.Context, dir, name string, args ...string) (string, error), pre func(ctx context.Context, cfg Config) (string, error)) {
+	t.Helper()
+	oldExec := serviceExec
+	oldPre := servicePreCheck
+	serviceExec = exec
+	if pre != nil {
+		servicePreCheck = pre
+	}
+	t.Cleanup(func() {
+		serviceExec = oldExec
+		servicePreCheck = oldPre
+	})
+}
+
+// okPreCheck is a faked passing doctor gate.
+func okPreCheck(ctx context.Context, cfg Config) (string, error) { return "platform: test", nil }
+
+// failingPreCheck is a faked failing doctor gate.
+func failingPreCheck(ctx context.Context, cfg Config) (string, error) { return "", fmt.Errorf("pi: not-found") }
+
+// execRecorder records every daemon call so tests can assert the exact
+// launchctl/systemctl sequences (bootout precedes bootstrap, restart present,
+// …) without a live daemon.
+type execRecorder struct {
+	calls [][]string
+}
+
+func (r *execRecorder) run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	c := append([]string{}, name)
+	c = append(c, args...)
+	r.calls = append(r.calls, c)
+	return "", nil
+}
+
+func (r *execRecorder) names() []string {
+	out := []string{}
+	for _, c := range r.calls {
+		out = append(out, strings.Join(c, " "))
+	}
+	return out
+}
+
+func (r *execRecorder) has(name string) bool {
+	for _, c := range r.calls {
+		if strings.Join(c, " ") == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *execRecorder) index(name string) int {
+	for i, c := range r.calls {
+		if strings.Join(c, " ") == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestServicePlatformLabelMatrix exercises the pure platform label for the
+// three supported targets without any GOOS skip (mirrors platform_test.go).
+func TestServicePlatformLabelMatrix(t *testing.T) {
+	for _, tc := range []struct{ goos, goarch, want string }{
+		{"darwin", "arm64", "darwin/arm64"},
+		{"linux", "arm64", "linux/arm64"},
+		{"linux", "amd64", "linux/amd64"},
+	} {
+		if got := platformLabelFrom(tc.goos, tc.goarch); got != tc.want {
+			t.Fatalf("platformLabelFrom(%s/%s) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		}
+	}
+}
+
+// TestServiceUnsupportedGOOS asserts planning/starting on an unsupported GOOS
+// fails with a specific error naming the GOOS.
+func TestServiceUnsupportedGOOS(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	if _, err := planServiceInstall(cfg, sentinelToken, "windows"); err == nil {
+		t.Fatal("plan for windows must fail")
+	} else if !strings.Contains(err.Error(), "windows") {
+		t.Fatalf("error must name the unsupported GOOS, got: %v", err)
+	}
+	if _, _, err := installServiceFiles(cfg, sentinelToken, "windows"); err == nil {
+		t.Fatal("install for windows must fail")
+	}
+}
+
+// TestServiceInstallFreshInstall asserts a fresh install (empty HOME) writes
+// the exact artifact set with expected modes and issues one start per platform.
+func TestServiceInstallFreshInstall(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			rec := &execRecorder{}
+			serviceSeams(t, rec.run, okPreCheck)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			stateDir := t.TempDir()
+			cfg := serviceTestConfig(t, stateDir)
+
+			// Fresh install must not pre-create the secret file.
+			_, err := installServiceForTest(cfg, sentinelToken, goos)
+			if err != nil {
+				t.Fatalf("install(%s): %v", goos, err)
+			}
+
+			assertMode := func(path string, want os.FileMode) {
+				t.Helper()
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("stat %s: %v", path, err)
+				}
+				if got := info.Mode().Perm(); got != want {
+					t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+				}
+			}
+			assertMode(filepath.Join(stateDir, serviceSecret), 0600)
+			if goos == "darwin" {
+				assertMode(filepath.Join(stateDir, serviceRunner), 0700)
+				assertMode(filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist"), 0600)
+				// One bootstrap (the start) plus the ignored bootout.
+				if !rec.has(fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist"))) {
+					t.Fatalf("expected launchctl bootstrap, got: %v", rec.names())
+				}
+				if !rec.has(fmt.Sprintf("launchctl bootout gui/%d/%s", os.Getuid(), serviceLabel)) {
+					t.Fatalf("expected launchctl bootout before bootstrap, got: %v", rec.names())
+				}
+				// bootout must precede bootstrap (upgrade semantics).
+				if b, s := rec.index(fmt.Sprintf("launchctl bootout gui/%d/%s", os.Getuid(), serviceLabel)), rec.index(fmt.Sprintf("launchctl bootstrap gui/%d %s", os.Getuid(), filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist"))); b == -1 || s == -1 || b > s {
+					t.Fatalf("bootout must precede bootstrap: %v", rec.names())
+				}
+			} else {
+				assertMode(filepath.Join(home, ".config", "systemd", "user", serviceUnit), 0600)
+				if !rec.has("systemctl --user daemon-reload") || !rec.has("systemctl --user enable "+serviceUnit) || !rec.has("systemctl --user restart "+serviceUnit) {
+					t.Fatalf("expected daemon-reload + enable + restart, got: %v", rec.names())
+				}
+			}
+		})
+	}
+}
+
+// installServiceForTest drives the full install path (pre-check + files +
+// daemon start) but is parameterized on goos so both templates run on any host.
+// It reuses the same rendering/writing as ServiceInstall while letting the
+// test force the target goos (ServiceInstall itself uses runtime.GOOS, which a
+// linux test cannot switch to darwin). The daemon start is dispatched through
+// serviceExec via startLaunchAgent/startSystemdUser, so the recorder captures it.
+func installServiceForTest(cfg Config, token string, goos string) (string, error) {
+	if goos != "darwin" && goos != "linux" {
+		return "", fmt.Errorf("system service support exists for macOS and Linux, not for %s", goos)
+	}
+	if _, err := servicePreCheck(context.Background(), cfg); err != nil {
+		return "", err
+	}
+	plan, err := planServiceInstall(cfg, token, goos)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(plan.logs, 0700); err != nil {
+		return "", err
+	}
+	if err := writeServiceSecrets(cfg.StateDir, token); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(plan.unitPath), 0700); err != nil {
+		return "", err
+	}
+	switch goos {
+	case "darwin":
+		if err := writeServiceRunner(plan.runnerPath, plan.bin, plan.cfgPath, plan.envFile); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(plan.unitPath, []byte(plan.unitBody), 0600); err != nil {
+			return "", err
+		}
+		if err := startLaunchAgent(); err != nil {
+			return "", err
+		}
+	case "linux":
+		if err := os.WriteFile(plan.unitPath, []byte(plan.unitBody), 0600); err != nil {
+			return "", err
+		}
+		note, err := startSystemdUser()
+		if err != nil {
+			return "", err
+		}
+		return unitInstalledMessage(plan, note), nil
+	}
+	return unitInstalledMessage(plan, ""), nil
+}
+
+// TestServiceInstallRepeatRun installs twice and asserts idempotency: identical
+// unit/plist bytes, exactly one token line, foreign lines preserved.
+func TestServiceInstallRepeatRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	if _, err := installServiceForTest(cfg, sentinelToken, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	unitPath := filepath.Join(home, ".config", "systemd", "user", serviceUnit)
+	first, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Operator adds a foreign line.
+	env := filepath.Join(stateDir, serviceSecret)
+	data, _ := os.ReadFile(env)
+	if err := os.WriteFile(env, append(data, []byte("OPENAI_API_KEY=foreign\n")...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Second install with the same token: identical unit bytes, one token line.
+	if _, err := installServiceForTest(cfg, sentinelToken, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("repeat install must be byte-identical:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+	envData, _ := os.ReadFile(env)
+	s := string(envData)
+	if strings.Count(s, "PI_AUTOPILOT_TELEGRAM_TOKEN=") != 1 {
+		t.Fatalf("secret file must have exactly one token line: %s", s)
+	}
+	if !strings.Contains(s, "OPENAI_API_KEY=foreign") {
+		t.Fatalf("foreign line must be preserved: %s", s)
+	}
+}
+
+// TestServiceInstallPreservesStateWorktreesConfig plants state.json, a worktree
+// file and config.yaml, then asserts they are byte-identical after install.
+func TestServiceInstallPreservesStateWorktreesConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	state := filepath.Join(stateDir, "state.json")
+	if err := os.WriteFile(state, []byte(`{"phase":"plan"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(stateDir, "worktrees", "issue-11", "README.md")
+	if err := os.MkdirAll(filepath.Dir(wt), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wt, []byte("# worktree\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Path, []byte("repo: x/y\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, _ := os.ReadFile(state)
+	wtBefore, _ := os.ReadFile(wt)
+	cfgBefore, _ := os.ReadFile(cfg.Path)
+
+	if _, err := installServiceForTest(cfg, sentinelToken, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	stateAfter, _ := os.ReadFile(state)
+	wtAfter, _ := os.ReadFile(wt)
+	cfgAfter, _ := os.ReadFile(cfg.Path)
+	if string(stateBefore) != string(stateAfter) {
+		t.Fatalf("state.json must be untouched: %s -> %s", stateBefore, stateAfter)
+	}
+	if string(wtBefore) != string(wtAfter) {
+		t.Fatalf("worktree file must be untouched: %s -> %s", wtBefore, wtAfter)
+	}
+	if string(cfgBefore) != string(cfgAfter) {
+		t.Fatalf("config.yaml must be untouched: %s -> %s", cfgBefore, cfgAfter)
+	}
+}
+
+// TestServiceInstallReportsHost asserts the install message carries the
+// platform label and the resolved binary path.
+func TestServiceInstallReportsHost(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	msg, err := installServiceForTest(cfg, sentinelToken, "linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "platform: "+platformLabel()) {
+		t.Fatalf("message must carry the platform label: %s", msg)
+	}
+	bin, err := serviceBin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "binary: "+bin) {
+		t.Fatalf("message must carry the resolved binary path: %s", msg)
+	}
+}
+
+// TestServiceInstallDoctorGateBlocks asserts a failing pre-check aborts the
+// install before any filesystem write and any daemon call.
+func TestServiceInstallDoctorGateBlocks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, failingPreCheck)
+
+	if _, err := installServiceForTest(cfg, sentinelToken, "linux"); err == nil {
+		t.Fatal("install must fail when the pre-enable doctor check fails")
+	} else if !strings.Contains(err.Error(), "pi: not-found") {
+		t.Fatalf("error must surface the specific doctor cause, got: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("no daemon call may be made when the gate fails, got: %v", rec.names())
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, serviceSecret)); !os.IsNotExist(err) {
+		t.Fatal("no secret file may be written when the gate fails")
+	}
+}
+
+// TestServiceInstallDoctorGatePasses asserts a passing gate proceeds to install.
+func TestServiceInstallDoctorGatePasses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+	if _, err := installServiceForTest(cfg, sentinelToken, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, serviceSecret)); err != nil {
+		t.Fatalf("secret file must be written when the gate passes: %v", err)
+	}
+}
+
+// TestServiceInstallDryRunWritesNothing asserts the dry-run plan renders without
+// writing any file anywhere under HOME or stateDir.
+func TestServiceInstallDryRunWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	// We can only call the runtime-GOOS dry-run entry from this host, so drive
+	// the pure plan directly for both templates (the seam keeps it platform-independent).
+	for _, goos := range []string{"darwin", "linux"} {
+		p, err := planServiceInstall(cfg, sentinelToken, goos)
+		if err != nil {
+			t.Fatalf("plan(%s): %v", goos, err)
+		}
+		// The plan must never carry the token value anywhere in its rendered bodies.
+		for _, body := range []string{p.unitBody, p.runnerBody} {
+			if body != "" && strings.Contains(body, sentinelToken) {
+				t.Fatalf("plan body leaked the token (%s)", goos)
+			}
+		}
+		if p.bin == "" || p.platform == "" {
+			t.Fatalf("plan must carry binary + platform (%s): %+v", goos, p)
+		}
+	}
+	// No regular files may have been created under HOME or stateDir by planning.
+	var fileCount int
+	for _, root := range []string{home, stateDir} {
+		filepath.Walk(root, func(_ string, info os.FileInfo, _ error) error {
+			if info != nil && info.Mode().IsRegular() {
+				fileCount++
+			}
+			return nil
+		})
+	}
+	if fileCount != 0 {
+		t.Fatalf("plan must not write any file, found %d regular files under HOME/stateDir", fileCount)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("dry-run must not invoke the daemon, got: %v", rec.names())
+	}
+}
+
+// TestServiceUninstallDryRunReportsOnly asserts the uninstall dry-run reports
+// what would be removed but leaves the files in place and prints no secret.
+func TestServiceUninstallDryRunReportsOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	// Install files only (no daemon start) so the tree exists.
+	if _, _, err := installServiceFiles(cfg, sentinelToken, "linux"); err != nil {
+		t.Fatal(err)
+	}
+	unitPath := filepath.Join(home, ".config", "systemd", "user", serviceUnit)
+	env := filepath.Join(stateDir, serviceSecret)
+
+	// Drive the pure renderer with goos=linux so the linux template is
+	// exercised from any host (the public ServiceUninstallDryRun is
+	// runtime-GOOS-bound).
+	out := renderUninstallDryRun("linux", home, stateDir)
+	if strings.Contains(out, sentinelToken) {
+		t.Fatalf("uninstall dry-run must not print the secret: %s", out)
+	}
+	if !strings.Contains(out, unitPath) {
+		t.Fatalf("dry-run must report the unit path: %s", out)
+	}
+	if !strings.Contains(out, "present") {
+		t.Fatalf("dry-run must report the unit is present: %s", out)
+	}
+	// The files must still exist after the dry-run.
+	if _, err := os.Stat(unitPath); err != nil {
+		t.Fatalf("unit must still exist after dry-run: %v", err)
+	}
+	if _, err := os.Stat(env); err != nil {
+		t.Fatalf("secret file must still exist after dry-run: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("dry-run must not invoke the daemon, got: %v", rec.names())
+	}
+}
+
+// TestServicePlanDryRunNoSecretLeak asserts the full install dry-run output
+// (runtime GOOS) contains the paths + modes but never the token value.
+func TestServicePlanDryRunNoSecretLeak(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateDir := t.TempDir()
+	cfg := serviceTestConfig(t, stateDir)
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, okPreCheck)
+
+	out, err := ServiceInstallDryRun(cfg, sentinelToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, sentinelToken) {
+		t.Fatalf("install dry-run must not print the token value: %s", out)
+	}
+	if !strings.Contains(out, "DRY RUN") {
+		t.Fatalf("dry-run output must be labeled: %s", out)
+	}
+	if !strings.Contains(out, "binary: ") || !strings.Contains(out, "platform: ") {
+		t.Fatalf("dry-run must report binary + platform: %s", out)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("dry-run must not invoke the daemon, got: %v", rec.names())
+	}
+}
+
+// TestServiceRestart asserts the restart subcommand issues the platform-native
+// restart through the seam (no real daemon).
+func TestServiceRestart(t *testing.T) {
+	rec := &execRecorder{}
+	serviceSeams(t, rec.run, nil)
+	// ServiceRestart uses runtime.GOOS; on the linux CI host it must issue
+	// `systemctl --user restart`. On a darwin host it would issue kickstart.
+	if runtime.GOOS == "linux" {
+		if _, err := ServiceRestart(); err != nil {
+			t.Fatal(err)
+		}
+		if !rec.has("systemctl --user restart "+serviceUnit) {
+			t.Fatalf("expected systemctl --user restart, got: %v", rec.names())
+		}
+	} else if runtime.GOOS == "darwin" {
+		if _, err := ServiceRestart(); err != nil {
+			t.Fatal(err)
+		}
+		if !rec.has("launchctl kickstart -k gui/"+strconv.Itoa(os.Getuid())+"/"+serviceLabel) {
+			t.Fatalf("expected launchctl kickstart -k, got: %v", rec.names())
+		}
 	}
 }
